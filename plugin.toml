@@ -6,3 +6,6 @@ fs_write = true
 net = true
 run = true
 env = true
+# Fork-only permission (Firaenix/maki): gates maki.api.register_reviewer,
+# which automode.lua and goal.lua both call at load time.
+reviewers = true
