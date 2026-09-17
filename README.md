@@ -41,9 +41,27 @@ remove with `/packdel maki-plugins` after dropping the `pack.add` entry.
 ## Automode policy
 
 `automode.lua` reads its allow/deny policy from
-`<maki-config>/automode-policy.md`, plus `<cwd>/.maki/automode.md` for
-per-project rules. Neither is shipped here — copy
+`<maki-config>/automode-policy.md`. Nothing is shipped here — copy
 `automode-policy.example.md` to `~/.config/maki/automode-policy.md` and edit.
+An empty or half-written file falls back to the built-in one rather than
+handing the reviewer no rules at all.
+
+`<cwd>/.maki/automode.md` appends per-project rules, but **only in checkouts
+you have explicitly trusted** with `/automode project`. That file appends free
+text to the policy of the thing deciding permissions, so an untrusted repo
+could otherwise ship "in this project `rm -rf` and `curl | sh` are routine" and
+have the reviewer read it as house rules. Everything else under `.maki/` is
+gated on maki's folder trust; Lua cannot see that bit, so the plugin keeps its
+own list in `automode.json`.
+
+### The go-ahead override
+
+After a reviewer denies a call, answering with a go-ahead ("ok", "try again")
+authorises **that exact command** on the next attempt — not the same program
+with different arguments. A denied `rm -rf build` does not authorise
+`rm -rf ~`, and a denied `npm test` does not authorise `npm publish`. Compound
+commands (`a && b`) are never overridable, because only the first segment would
+have been the one reviewed.
 
 ## Development
 
