@@ -23,19 +23,20 @@ remove with `/packdel maki-plugins` after dropping the `pack.add` entry.
 | `plugin/automode.lua` | `/automode` | Reviewer models classify tool calls that would otherwise prompt, via `maki.api.register_reviewer`. The plugin owns the security prompt and calls the models itself with `maki.model.complete`. Toggle, status, model chain, and a verdict log showing the exact request each reviewer saw. |
 | `plugin/context.lua` | `/context` | Context-window usage panel: window and pricing from `maki.model.info`, with a `/v1/models` discovery fallback on older binaries. |
 | `plugin/goal.lua` | `/goal`, `goal_complete` tool | Keeps the agent working across turns until the goal is met, the budget or round cap is hit, or you intervene. |
-| `plugin/pr_mention.lua` | `#` completer | Completes a PR/MR link from the repo in cwd via `gh` or `glab`. |
+| `plugin/pr_mention.lua` | `#` popup | Completes a PR/MR link from the repo in cwd via `gh` or `glab`. Fetches the open list once per directory (60s TTL) and narrows it in Lua as you type. |
 | `plugin/rv.lua` | `/rv` | In-maki review UI over the [`rv`](https://github.com/Firaenix/rv) CLI: file tree, diff pane, anchored comments, reply/resolve/abandon. |
 | `plugin/skills.lua` | `/skills` | Lists every skill the bundled `skill` tool would discover, without asking the model. |
 | `plugin/tool-alias.lua` | tool hook | Strips CLIProxyAPI's MCP alias decoration from tool names inside string payloads (`code_execution.code`, `batch.tool_calls[].tool`). |
+| `lua/input_popup.lua` | module | Trigger-character completion popup over `maki.ui.input`: placement, keys, local filtering. Used by `pr_mention`. |
 | `lua/model_select.lua` | module | Shared model catalog + picker used by `automode` and `context`. |
 
 ## Requirements
 
 - maki 0.5.0+. Several plugins use APIs that only exist on the
   [Firaenix/maki](https://github.com/Firaenix/maki) fork
-  (`register_reviewer`, `register_input_completer`, `maki.ui.picker`,
-  `maki.model.info`, `maki.model.complete`, `maki.session.messages`). Each one
-  feature-detects and degrades instead of failing to load.
+  (`register_reviewer`, `maki.ui.input`, `maki.ui.picker`, `maki.model.info`,
+  `maki.model.complete`, `maki.session.messages`). Each one feature-detects and
+  degrades instead of failing to load.
 - `rv` on `PATH` for `/rv`; `gh` or `glab` for `#` completion.
 
 ## Automode policy
