@@ -2,9 +2,9 @@
 --
 -- Factored out of the `#` PR completer so anything else wanting "type a
 -- character, pick from a list, insert a string" gets the fiddly parts for
--- free: placement against a caret that may not exist, keys that come back off
--- on every exit path, and a list that narrows in Lua rather than re-asking its
--- source on every keystroke.
+-- free: a float that sits on the input caret and takes only the keys it
+-- claims, a list that narrows in Lua rather than re-asking its source on
+-- every keystroke, and teardown that hands every key back on every exit path.
 --
 --   local popup = require("input_popup").attach({
 --     trigger = "#",
@@ -21,7 +21,13 @@
 -- a source that costs a network round trip caches its own answer once and the
 -- popup can never turn a keystroke into a request. Returning nil closes.
 --
--- Requires maki.ui.input; callers feature-detect before requiring this.
+-- Built the way maki's bundled `@` completion is: the popup is an unfocused
+-- float anchored at `input_caret`, so the host places it beside the caret
+-- every frame and the user keeps typing into the input beneath it. The keys
+-- it takes are declared on the window and die with it, which is what makes
+-- the teardown safe: closing the float is what hands `<CR>` back.
+--
+-- Requires maki.ui.input_edit; callers feature-detect before requiring this.
 
 local M = {}
 
@@ -35,16 +41,21 @@ local ZINDEX = 120
 local DEFAULT_MAX_ITEMS = 10
 local GAP = "  "
 local FOOTER = { { "Tab", "next" }, { "Enter", "insert" }, { "Esc", "close" } }
--- Only unshifted keys. A shifted character arrives with SHIFT set and the
--- override table compares modifiers exactly, which is not something a plugin
--- should have to know per terminal.
-local KEYS = {
-  { "<Tab>", "next" },
-  { "<C-n>", "next" },
-  { "<C-p>", "prev" },
-  { "<CR>", "accept" },
-  { "<Esc>", "close" },
+-- Two spellings per key: the notation the window claims it in, and the name
+-- `win:recv` reports the press under. `<S-Tab>` cannot join: it parses to Tab
+-- with Shift while terminals deliver BackTab, so a claim on it never fires.
+local BINDINGS = {
+  { claim = "<Tab>", event = "tab", run = "next" },
+  { claim = "<C-n>", event = "ctrl+n", run = "next" },
+  { claim = "<C-p>", event = "ctrl+p", run = "prev" },
+  { claim = "<CR>", event = "enter", run = "accept" },
+  { claim = "<Esc>", event = "esc", run = "close" },
 }
+local KEYS, HANDLERS = {}, {}
+for i, b in ipairs(BINDINGS) do
+  KEYS[i] = b.claim
+  HANDLERS[b.event] = b.run
+end
 
 local Popup = {}
 Popup.__index = Popup
@@ -83,51 +94,15 @@ local function row_width(item)
   return w
 end
 
--- Rows of content that fit on the roomier side of {caret}. Whichever side has
--- more space wins rather than trying above first: a caret near the top of the
--- screen has the whole transcript below it and two rows above. Getting this
--- wrong is silent, because the host clamps a float that runs off the screen
--- down to whatever is left instead of refusing it.
-local function room(caret, size)
-  local above = caret.row
-  local below = size.rows - caret.row - 1
-  return math.max(above, below) - BORDER
-end
-
--- Row, col and total height for a popup showing {rows} rows, or nil when
--- neither side of the caret has room for even one.
-local function fit(caret, rows, width, size)
-  local avail = room(caret, size)
-  if rows < 1 or avail < 1 then
-    return nil
-  end
-  local height = math.min(rows, avail) + BORDER
-  local above = caret.row
-  local below = size.rows - caret.row - 1
-  local row = above >= below and caret.row - height or caret.row + 1
-  local col = math.max(0, math.min(caret.col, size.cols - width))
-  return row, col, height
-end
-
--- Unbinding is the one thing that must never be skipped: an error with `<CR>`
--- still claimed leaves the user unable to send a message at all. Each key
--- comes off on its own so a failure on one cannot strand the rest.
-function Popup:unbind()
-  local keys = self.bound
-  self.bound = {}
-  for _, key in ipairs(keys) do
-    pcall(maki.keymap.del, "n", key)
-  end
-end
-
--- The only teardown. Keys come off before anything that could fail.
+-- The only teardown. Closing the window is what releases its key claims, so
+-- nothing here can fail with `<CR>` still taken.
 function Popup:close()
   local win = self.win
-  self.win, self.buf, self.items, self.placeholder = nil, nil, {}, nil
+  self.win, self.buf, self.items, self.placeholder, self.st, self.start =
+    nil, nil, {}, nil, nil, nil
   -- Bumped so a round trip that comes back after the popup it was for has
   -- gone cannot repaint the one that replaced it.
   self.generation = self.generation + 1
-  self:unbind()
   if win then
     pcall(function()
       win:close()
@@ -161,10 +136,7 @@ end
 
 function Popup:move(delta)
   if not self.win then
-    -- A binding outlived its popup. Take the keys off so the next press
-    -- reaches the input box and swallow this one: the host counts a key as
-    -- claimed the moment the callback is dispatched.
-    return self:unbind()
+    return
   end
   local n = #self.items
   if n > 0 then
@@ -173,72 +145,60 @@ function Popup:move(delta)
   end
 end
 
--- Re-reads the input instead of trusting what was on screen when the popup was
--- drawn: the handler runs a frame or more after the key, and the edit has to
--- land on the mention that is there now.
+-- Insert the highlighted row over the mention it was ranked for. The range,
+-- version and session all came with the snapshot the refresh drew from;
+-- `maki.ui.input_edit` weighs that snapshot itself and refuses an edit the
+-- input has moved past. The popup closes first, which hands the keys back
+-- before the edit fires the `InputChanged` this plugin listens to.
 function Popup:accept()
   local choice = self.win and self.items[self.sel]
+  local st, start = self.st, self.start
   -- Nothing to insert, which is the placeholder popup. The press is already
   -- claimed and cannot be handed back, so the most it can do is get the popup
   -- out of the way for the next one.
-  if not choice then
+  if not choice or not st or not start then
     return self:close()
   end
-  local st = maki.ui.input()
-  local start = st and find(st.text, st.cursor, self.pattern)
-  if not start then
-    return self:close()
-  end
+  self:close()
   local ok, text = pcall(self.insert, choice)
   if not ok or type(text) ~= "string" then
-    return self:close()
+    return
   end
-  -- The version refuses the edit outright if the user typed while this handler
-  -- was running, rather than writing over a range that has since moved.
-  local _, err = maki.ui.input_edit({
+  local done, err = maki.ui.input_edit({
     start = start,
     stop = st.cursor,
     text = text,
     version = st.version,
+    session_id = st.session_id,
   })
-  if err then
-    maki.ui.flash(err)
+  if not done then
+    maki.ui.flash(self.name .. ": not inserted: " .. tostring(err))
   end
-  self:close()
 end
 
--- These replace whatever the user already had on the same key, and putting one
--- back is not something the keymap API can do, so the keys are only ever
--- claimed for as long as the popup is on screen.
-function Popup:bind()
-  local handlers = {
-    next = function()
-      self:move(1)
-    end,
-    prev = function()
-      self:move(-1)
-    end,
-    accept = function()
-      self:accept()
-    end,
-    close = function()
-      self:close()
-    end,
-  }
-  for _, entry in ipairs(KEYS) do
-    local opts = { desc = self.name .. ": " .. entry[2] }
-    local ok = pcall(maki.keymap.set, "n", entry[1], handlers[entry[2]], opts)
-    -- Only a key we actually claimed goes on the list: maki.keymap.del is
-    -- given a key rather than a binding, so deleting one we never took could
-    -- take another plugin's with it.
-    if ok then
-      self.bound[#self.bound + 1] = entry[1]
+-- The popup's key loop, one per window. It ends with the window: `close`
+-- takes the float down and the host answers with a `close` event. A key
+-- queued before a close can land after a newer popup has opened, so {win}
+-- has to still be the one on screen.
+function Popup:read_keys(win)
+  maki.async.run(function()
+    while true do
+      local ev = win:recv()
+      if not ev or ev.type == "close" then
+        return
+      end
+      if ev.type == "key" and self.win == win then
+        local run = HANDLERS[ev.key]
+        if run then
+          self[run](self)
+        end
+      end
     end
-  end
+  end)
 end
 
--- Opened hidden, so the first frame never paints it at the placeholder
--- position it was created with.
+-- Opened hidden, so the first frame never paints an empty popup before the
+-- rows it is for have been read.
 function Popup:ensure()
   if self.win then
     return
@@ -247,34 +207,29 @@ function Popup:ensure()
   self.win = maki.ui.open_win(buf, {
     width = MIN_WIDTH,
     height = BORDER + 1,
-    row = 0,
-    col = 0,
-    anchor = "NW",
+    anchor = "input_caret",
     border = "rounded",
     footer = FOOTER,
     zindex = ZINDEX,
     focus = false,
     visible = false,
+    keys = KEYS,
   })
   self.buf, self.sel, self.items = buf, 1, {}
-  self:bind()
+  self:read_keys(self.win)
 end
 
-function Popup:render(caret, size)
+-- Only the size. The caret anchor decides where the popup goes and the host
+-- redoes that every frame, so it follows the caret through wraps and resizes.
+function Popup:render()
   local shown = self:rows()
   local width = MIN_WIDTH
   for _, item in ipairs(shown) do
     width = math.max(width, row_width(item) + PAD + BORDER)
   end
-  width = math.min(width, size.cols)
-  local row, col, height = fit(caret, #shown, width, size)
-  -- Nowhere on screen to put it. Closing beats handing the host a rect it has
-  -- to clamp into a sliver.
-  if not row then
-    return self:close()
-  end
+  local size = maki.ui.terminal_size()
   self.buf:set_lines(self:lines())
-  self.win:set_config({ width = width, height = height, row = row, col = col })
+  self.win:set_config({ width = math.min(width, size.cols), height = #shown + BORDER })
   self.win:show()
 end
 
@@ -292,9 +247,10 @@ function Popup:narrow(supplied, query, limit)
 end
 
 -- The one place that decides whether there should be a popup at all and what
--- is in it. Everything it needs it reads for itself, because between the
--- keystroke that woke it and here the user may have typed on.
-function Popup:refresh()
+-- is in it. {st} is the chat input as the host last reported it: the
+-- `InputChanged` payload carries text, cursor, version and session, every
+-- field `maki.ui.input` would answer with and one round trip less.
+function Popup:refresh(st)
   local token = self.generation
   self.latest = self.latest + 1
   local mine = self.latest
@@ -305,27 +261,10 @@ function Popup:refresh()
     return self.generation ~= token or self.latest ~= mine
   end
 
-  local st = maki.ui.input()
-  if stale() then
-    return
-  end
-  -- `caret` is absent whenever the input box is not the thing the terminal
-  -- cursor sits in — before the first frame, under a modal, during a form
-  -- takeover — and there is nothing to anchor a popup to then.
-  if not st or not st.caret then
-    return self:close()
-  end
   local start, query = find(st.text, st.cursor, self.pattern)
   -- A slash command owns the input while the command palette is up, and its
   -- own Tab and Enter with it.
   if not start or st.text:sub(1, 1) == "/" then
-    return self:close()
-  end
-  local size = maki.ui.terminal_size()
-  -- Asking for more rows than the screen has is what leaves the host clamping
-  -- the float, so the limit is what fits rather than what was configured.
-  local limit = math.min(self.max_items, room(st.caret, size))
-  if limit < 1 then
     return self:close()
   end
 
@@ -334,8 +273,9 @@ function Popup:refresh()
   -- warm one keeps the list that is already up instead of flashing this.
   if not self.win and self.pending then
     self:ensure()
+    self.st, self.start = st, start
     self.placeholder = self.pending
-    self:render(st.caret, size)
+    self:render()
     if stale() then
       return
     end
@@ -351,9 +291,11 @@ function Popup:refresh()
   if not ok or type(supplied) ~= "table" then
     return self:close()
   end
-  local items = self:narrow(supplied, query, limit)
+  local items = self:narrow(supplied, query, self.max_items)
 
   self:ensure()
+  -- The snapshot the rows answer, and the range an accept writes over.
+  self.st, self.start = st, start
   self.placeholder = nil
   -- The highlight follows the item it was on while that item is still listed,
   -- so a keystroke that only drops candidates does not move the selection out
@@ -365,7 +307,7 @@ function Popup:refresh()
       self.sel = i
     end
   end
-  self:render(st.caret, size)
+  self:render()
 end
 
 -- Registers the trigger and returns the popup, whose only useful method from
@@ -373,11 +315,11 @@ end
 --
 -- opts:
 --   trigger    (string)   the character that opens it.
---   name       (string)   used in keymap descriptions.
+--   name       (string)   used in messages.
 --   items      (function) -> list of { label, insert?, detail? } or nil.
 --   insert     (function) item -> the text to write over the mention.
 --   match      (function) item, query -> boolean. Default: substring of label.
---   max_items  (integer)  rows at once, further clamped to what fits.
+--   max_items  (integer)  rows at once.
 --   empty      (string)   row shown when nothing matched.
 --   pending    (string)   row shown while a cold `items` is in flight.
 function M.attach(opts)
@@ -399,8 +341,8 @@ function M.attach(opts)
     buf = nil,
     sel = 1,
     placeholder = nil,
-    -- The keys claimed right now, so teardown removes exactly those.
-    bound = {},
+    st = nil,
+    start = nil,
     generation = 0,
     latest = 0,
   }, Popup)
@@ -410,37 +352,49 @@ function M.attach(opts)
   -- every printable character.
   maki.api.create_autocmd("InputChanged", {
     callback = function(ev)
-      -- An accept is itself an input_edit, and so an InputChanged. Acting on
-      -- it would reopen the popup on the text just inserted.
-      if ev.data.source == "plugin" then
+      local data = ev.data
+      -- An accept is itself an input_edit, and so an InputChanged naming the
+      -- plugin that wrote it. Acting on it would reopen the popup on the text
+      -- just inserted.
+      if data.source then
         return
       end
-      if not popup.win and not find(ev.data.text, ev.data.cursor, popup.pattern) then
+      -- A caret the user moved can take the popup away but never put one up:
+      -- arrowing back over a trigger dismissed with Esc would otherwise reopen
+      -- it.
+      if data.cursor_only and not popup.win then
+        return
+      end
+      -- Focusing another tab fires this for the input that tab holds, which
+      -- is another line of text entirely.
+      if popup.win and popup.st and popup.st.session_id ~= data.session_id then
+        popup:close()
+      end
+      if not popup.win and not find(data.text, data.cursor, popup.pattern) then
         return
       end
       -- Autocmd dispatch waits on its handlers, so the round trips run off to
       -- the side rather than holding every other plugin's events behind them.
       maki.async.run(function()
-        popup:refresh()
+        popup:refresh(data)
       end)
     end,
   })
 
-  -- The input of another session is another line of text entirely, and the
-  -- popup was placed against this one.
-  maki.api.create_autocmd({ "SessionFocusChanged", "SessionReset" }, {
+  maki.api.create_autocmd({ "SessionFocusChanged", "SessionReset", "TaskFocusChanged" }, {
     callback = function()
       popup:close()
     end,
   })
 
-  -- A turn starting takes the input box away, and `<Esc>` goes to cancelling
-  -- the turn rather than to this plugin, so without this the popup would sit
-  -- there with `<CR>` still claimed and no key left that closes it. Closing
-  -- twice is harmless: the keys are already off and the window already gone.
+  -- A permission prompt, the plan form or a pack review takes the chat input
+  -- off screen, and the host then refuses to edit it. Leaving the popup up
+  -- would leave it holding keys for an accept that cannot land.
   maki.api.create_autocmd("SessionStatusChanged", {
-    callback = function()
-      popup:close()
+    callback = function(ev)
+      if ev.data.focused and ev.data.status == "needs_input" then
+        popup:close()
+      end
     end,
   })
 

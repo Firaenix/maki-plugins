@@ -830,16 +830,30 @@ maki.api.create_autocmd({ "SessionFocusChanged", "TurnStart" }, {
   end,
 })
 
--- Inspector: a scrollable window over the verdict history. The list
--- shows one line per link verdict; the detail pane below it shows the
--- selected entry's reason, scopes, and the verbatim request the reviewer
--- was given, so a surprising ASK can be traced to what it did (or
--- didn't) know.
-local function inspect_lines(sel, width)
+-- Inspector: two tabs over the verdict history. "verdicts" lists one line
+-- per link verdict; "request" shows the selected entry's reason, scopes,
+-- and the verbatim request the reviewer was given, so a surprising ASK
+-- can be traced to what it did (or didn't) know. The buffer is only
+-- rewritten when what it shows actually changed: every set_lines and
+-- set_cursor snaps the float's scroll back to the cursor, so a timer-driven
+-- redraw would keep yanking the request tab away from wherever the user
+-- had wheeled to.
+local INSPECT_TABS = { "verdicts", "request" }
+
+local function tab_bar(active)
+  local parts = {}
+  for i, name in ipairs(INSPECT_TABS) do
+    parts[#parts + 1] = (i == active) and ("[ " .. name .. " ]") or ("  " .. name .. "  ")
+  end
+  return table.concat(parts, " ")
+end
+
+local function verdict_lines(sel)
   local lines = {}
   local function add(s)
     lines[#lines + 1] = s
   end
+  add(tab_bar(1))
   add(
     string.format(
       "%s · allow %d deny %d escalate %d prompt %d redirect %d · $%.4f · chain: %s",
@@ -875,15 +889,34 @@ local function inspect_lines(sel, width)
       )
     )
   end
-  local h = history[sel]
-  add(string.rep("─", width))
+  -- Cursor row of the selected list line, for set_cursor.
+  return lines, list_start + (#history - sel)
+end
+
+local function request_lines(h, width)
+  local lines = {}
+  local function add(s)
+    lines[#lines + 1] = s
+  end
+  add(tab_bar(2))
+  if not h then
+    add("")
+    add("no verdicts yet this session")
+    return lines
+  end
   add(
     string.format(
-      "%s · %s · $%.4f",
+      "%s · %s · %s · %s · $%.4f",
+      h.at,
+      h.tool or "?",
       (h.reviewer ~= "" and h.reviewer) or "(maki)",
       h.model or "no model call",
       h.cost
     )
+  )
+  add(
+    string.format("%s / %s", h.verdict or "?", h.resolution or "?")
+      .. (h.reason and (" — " .. h.reason) or "")
   )
   if h.scopes and #h.scopes > 0 then
     add("scopes: " .. table.concat(h.scopes, " ; "))
@@ -893,7 +926,7 @@ local function inspect_lines(sel, width)
   if h.note then
     add("note: " .. h.note)
   end
-  add("")
+  add(string.rep("─", width))
   if h.request and h.request ~= "" then
     for line in (h.request .. "\n"):gmatch("(.-)\n") do
       add(line)
@@ -903,44 +936,132 @@ local function inspect_lines(sel, width)
   else
     add("(no request: this reviewer decided locally without calling a model)")
   end
-  -- Cursor row of the selected list line, for set_cursor.
-  return lines, list_start + (#history - sel)
+  return lines
 end
+
+local INSPECT_FOOTERS = {
+  { { "j/k", "select" }, { "tab", "request" }, { "q", "close" } },
+  {
+    { "j/k", "scroll" },
+    { "d/u", "half page" },
+    { "g/G", "top/bottom" },
+    { "tab", "verdicts" },
+    { "q", "close" },
+  },
+}
 
 local function inspect()
   local buf = maki.ui.buf()
   local width, height = 110, 40
-  local sel = #history
-  local lines, row = inspect_lines(sel, width)
-  buf:set_lines(lines)
+  local tab = 1
+  -- Selection is held by entry, not index: HISTORY_MAX trims from the
+  -- front, which would silently move an index-based selection.
+  local sel_entry = history[#history]
+  local cursor = 1
+  local line_count = 1
+  local rendered
+
+  local function sel_index()
+    for i = #history, 1, -1 do
+      if history[i] == sel_entry then
+        return i
+      end
+    end
+    sel_entry = history[#history]
+    return #history
+  end
+
   local win = maki.ui.open_win(buf, {
     title = "Automode",
     border = "rounded",
     width = width,
     height = height,
-    footer = { { "j/k", "select" }, { "q", "close" } },
+    footer = INSPECT_FOOTERS[tab],
   })
-  win:set_cursor(row)
+
+  local function render(force)
+    local sel = sel_index()
+    -- The request tab depends only on the selected entry, so a new
+    -- verdict arriving must not touch it.
+    local sig = (tab == 1) and string.format("1:%d:%d:%s", #history, sel, tostring(history[1]))
+      or string.format("2:%s", tostring(sel_entry))
+    if not force and sig == rendered then
+      return
+    end
+    rendered = sig
+    local lines
+    if tab == 1 then
+      lines, cursor = verdict_lines(sel)
+    else
+      lines = request_lines(sel_entry, width)
+      if force then
+        cursor = 1
+      end
+    end
+    line_count = #lines
+    buf:set_lines(lines)
+    win:set_cursor(cursor)
+  end
+
+  local function switch_tab(to)
+    tab = to
+    win:set_config({ footer = INSPECT_FOOTERS[tab] })
+    render(true)
+  end
+
+  local function scroll_to(row)
+    cursor = math.min(math.max(row, 1), line_count)
+    win:set_cursor(cursor)
+  end
+
+  render(true)
   while true do
     local ev = win:recv(1000)
     if not ev or ev.type == "close" then
       break
     end
     if ev.type == "key" then
-      if ev.key == "q" or ev.key == "esc" then
+      local k = ev.key
+      if k == "q" or k == "esc" then
         break
-      elseif (ev.key == "j" or ev.key == "down") and sel > 1 then
-        sel = sel - 1
-      elseif (ev.key == "k" or ev.key == "up") and sel < #history then
-        sel = sel + 1
+      elseif
+        k == "tab"
+        or k == "shift+tab"
+        or k == "l"
+        or k == "h"
+        or k == "left"
+        or k == "right"
+      then
+        switch_tab(tab == 1 and 2 or 1)
+      elseif k == "1" or k == "2" then
+        switch_tab(tonumber(k))
+      elseif tab == 1 then
+        local sel = sel_index()
+        if (k == "j" or k == "down") and sel > 1 then
+          sel_entry = history[sel - 1]
+        elseif (k == "k" or k == "up") and sel < #history then
+          sel_entry = history[sel + 1]
+        elseif k == "enter" then
+          switch_tab(2)
+        end
+      else
+        local half = math.floor(height / 2)
+        if k == "j" or k == "down" then
+          scroll_to(cursor + 1)
+        elseif k == "k" or k == "up" then
+          scroll_to(cursor - 1)
+        elseif k == "d" or k == "ctrl+d" or k == "pagedown" then
+          scroll_to(cursor + half)
+        elseif k == "u" or k == "ctrl+u" or k == "pageup" then
+          scroll_to(cursor - half)
+        elseif k == "g" or k == "home" then
+          scroll_to(1)
+        elseif k == "G" or k == "end" then
+          scroll_to(line_count)
+        end
       end
     end
-    if #history > 0 then
-      sel = math.min(math.max(sel, 1), #history)
-    end
-    lines, row = inspect_lines(sel, width)
-    buf:set_lines(lines)
-    win:set_cursor(row)
+    render(false)
   end
   win:close()
 end
