@@ -20,9 +20,9 @@ remove with `/packdel maki-plugins` after dropping the `pack.add` entry.
 
 | Entry | Surface | What it does |
 | --- | --- | --- |
-| `plugin/automode.lua` | `/automode` | Reviewer models classify tool calls that would otherwise prompt, via `maki.api.register_reviewer`. The plugin owns the security prompt and calls the models itself with `maki.model.complete`. Toggle, status, model chain, and a verdict log showing the exact request each reviewer saw. |
+| `plugin/automode.lua` | `/automode` | Reviewer models answer the permission prompt for calls that would otherwise prompt, as a layer on maki's `permission.prompt` slot. The plugin owns the security prompt, the timeout and the per-turn deny budget, and asks each model through a tool-less `maki.agent.session`. Toggle, status, model chain, and a verdict log showing the exact request each reviewer saw. |
 | `plugin/context.lua` | `/context` | Context-window usage panel: window and pricing from `maki.model.info`, with a `/v1/models` discovery fallback on older binaries. |
-| `plugin/goal.lua` | `/goal`, `goal_complete` tool | Keeps the agent working across turns until the goal is met, the budget or round cap is hit, or you intervene. |
+| `plugin/goal.lua` | `/goal`, `goal_complete` tool | Keeps the agent working across turns until the goal is met, the budget or round cap is hit, or you intervene. Stops the `question` tool through its `tool.question.input` slot while a goal runs. |
 | `plugin/pr_mention.lua` | `#` popup | Completes a PR/MR link from the repo in cwd via `gh` or `glab`. Fetches the open list once per directory (60s TTL) and narrows it in Lua as you type. |
 | `plugin/rv.lua` | `/rv` | In-maki review UI over the [`rv`](https://github.com/Firaenix/rv) CLI: file tree, diff pane, anchored comments, reply/resolve/abandon. |
 | `plugin/skills.lua` | `/skills` | Lists every skill the bundled `skill` tool would discover, without asking the model. |
@@ -34,9 +34,10 @@ remove with `/packdel maki-plugins` after dropping the `pack.add` entry.
 
 - maki 0.5.0+. Several plugins use APIs that only exist on the
   [Firaenix/maki](https://github.com/Firaenix/maki) fork
-  (`register_reviewer`, `maki.ui.input`, `maki.ui.picker`, `maki.model.info`,
-  `maki.model.complete`, `maki.session.messages`). Each one feature-detects and
-  degrades instead of failing to load.
+  (`maki.ui.input`, `maki.ui.picker`, `maki.model.info`,
+  `maki.session.messages`). Each one feature-detects and degrades instead of
+  failing to load. `automode` needs the `permission.prompt` slot
+  (tontinton/maki#1028); on a build without it the layer never fires.
 - `rv` on `PATH` for `/rv`; `gh` or `glab` for `#` completion.
 
 ## Automode policy
@@ -60,11 +61,19 @@ reviewer that only saw the prefix is downgraded to ASK — otherwise padding the
 first 8KB with boring content and hiding the payload behind it would be a
 straight bypass for `write` and `edit`.
 
-Reviewer spend is billed to the session by `maki.model.complete` and shows up in
-maki's own totals; `/automode status` and `/automode inspect` track it too.
-Set `plugins.automode.max_output_tokens` in `maki.setup` (default 512) if a
-reviewer model burns its whole budget on reasoning tokens and answers with
-nothing.
+Each review is a tool-less `maki.agent.session` opened on the reviewed call's
+ctx, so maki bills it to that session and it shows up in maki's own totals;
+`/automode status` and `/automode inspect` count its tokens too. A link gets 15
+seconds before it counts as an ASK, and maki hands the whole layer 60 seconds
+before the call goes to the prompt.
+
+A denial reaches the agent labelled with the plugin's name, as guidance it can
+act on. After three denials in one turn (per chat, so a subagent spends its
+own) automode stops judging and hands calls to the prompt: you decide in the
+TUI, and under `maki -p` that is a plain deny that costs no model call.
+
+When a reviewer allows a call, maki marks its tool row with `allowed by
+automode`, since you never saw a prompt for it.
 
 `<cwd>/.maki/automode.md` appends per-project rules, but **only in checkouts
 you have explicitly trusted** with `/automode project`. That file appends free
@@ -75,6 +84,9 @@ gated on maki's folder trust; Lua cannot see that bit, so the plugin keeps its
 own list in `automode.json`.
 
 ### The go-ahead override
+
+This reads the conversation through `maki.session.messages`, which only the
+fork has for now. Without it the override never fires and a denial stands.
 
 After a reviewer denies a call, answering with a go-ahead ("ok", "try again")
 authorises **that exact command** on the next attempt — not the same program

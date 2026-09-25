@@ -74,23 +74,17 @@ local function mine(ev)
   return goal and (ev.data or {}).session_id == goal.session
 end
 
--- Registered once; the handler consults live state, so no toggling
--- churn. Naming the question tool explicitly opts it into the fork's
--- veto review even though it needs no permission.
-maki.api.register_reviewer({
-  name = "goal-no-questions",
-  tools = { "question" },
-  order = -1,
-  timeout_ms = 2000,
-  handler = function()
-    if goal and not goal.paused and settings.block_questions then
-      return "DENY",
-        "goal mode is active — do not ask the user; decide autonomously, "
-          .. "note the assumption, and call goal_complete when the goal is done"
-    end
-    return "ALLOW"
-  end,
-})
+-- Registered once; the layer consults live state, so no toggling churn.
+-- The question tool needs no permission, so it never reaches the permission
+-- prompt, and its input slot is where a call can still be stopped.
+maki.api.set_slot("tool.question.input", function(prev, input, ctx)
+  if goal and not goal.paused and settings.block_questions then
+    return nil,
+      "goal mode is active: do not ask the user. Decide autonomously, "
+        .. "note the assumption, and call goal_complete when the goal is done"
+  end
+  return prev(input, ctx)
+end)
 
 -- The hint re-enters every system prompt, so the objective survives
 -- auto-compaction without any bookkeeping here.
