@@ -41,20 +41,21 @@ local ZINDEX = 120
 local DEFAULT_MAX_ITEMS = 10
 local GAP = "  "
 local FOOTER = { { "Tab", "next" }, { "Enter", "insert" }, { "Esc", "close" } }
--- Two spellings per key: the notation the window claims it in, and the name
--- `win:recv` reports the press under. `<S-Tab>` cannot join: it parses to Tab
--- with Shift while terminals deliver BackTab, so a claim on it never fires.
+-- One spelling per key: `win:recv` reports a press under the same canonical
+-- notation the window claimed it in, so the claim doubles as the lookup key.
+-- `<S-Tab>` stays out: it parses to Tab with Shift while terminals deliver
+-- BackTab, so a claim on it never fires.
 local BINDINGS = {
-  { claim = "<Tab>", event = "tab", run = "next" },
-  { claim = "<C-n>", event = "ctrl+n", run = "next" },
-  { claim = "<C-p>", event = "ctrl+p", run = "prev" },
-  { claim = "<CR>", event = "enter", run = "accept" },
-  { claim = "<Esc>", event = "esc", run = "close" },
+  { key = "<Tab>", run = "next" },
+  { key = "<C-n>", run = "next" },
+  { key = "<C-p>", run = "prev" },
+  { key = "<CR>", run = "accept" },
+  { key = "<Esc>", run = "close" },
 }
 local KEYS, HANDLERS = {}, {}
 for i, b in ipairs(BINDINGS) do
-  KEYS[i] = b.claim
-  HANDLERS[b.event] = b.run
+  KEYS[i] = b.key
+  HANDLERS[b.key] = b.run
 end
 
 local Popup = {}

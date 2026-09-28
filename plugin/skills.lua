@@ -240,7 +240,7 @@ maki.api.register_command({
       if not ev or ev.type == "close" then
         break
       end
-      if ev.type == "key" and (ev.key == "q" or ev.key == "esc") then
+      if ev.type == "key" and (ev.key == "q" or ev.key == "<Esc>") then
         break
       end
     end

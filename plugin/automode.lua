@@ -970,12 +970,12 @@ local function request_lines(h, width)
 end
 
 local INSPECT_FOOTERS = {
-  { { "j/k", "select" }, { "tab", "request" }, { "q", "close" } },
+  { { "j/k", "select" }, { "<Tab>", "request" }, { "q", "close" } },
   {
     { "j/k", "scroll" },
     { "d/u", "half page" },
     { "g/G", "top/bottom" },
-    { "tab", "verdicts" },
+    { "<Tab>", "verdicts" },
     { "q", "close" },
   },
 }
@@ -1052,41 +1052,41 @@ local function inspect()
     end
     if ev.type == "key" then
       local k = ev.key
-      if k == "q" or k == "esc" then
+      if k == "q" or k == "<Esc>" then
         break
       elseif
-        k == "tab"
-        or k == "shift+tab"
+        k == "<Tab>"
+        or k == "<S-Tab>"
         or k == "l"
         or k == "h"
-        or k == "left"
-        or k == "right"
+        or k == "<Left>"
+        or k == "<Right>"
       then
         switch_tab(tab == 1 and 2 or 1)
       elseif k == "1" or k == "2" then
         switch_tab(tonumber(k))
       elseif tab == 1 then
         local sel = sel_index()
-        if (k == "j" or k == "down") and sel > 1 then
+        if (k == "j" or k == "<Down>") and sel > 1 then
           sel_entry = history[sel - 1]
-        elseif (k == "k" or k == "up") and sel < #history then
+        elseif (k == "k" or k == "<Up>") and sel < #history then
           sel_entry = history[sel + 1]
-        elseif k == "enter" then
+        elseif k == "<CR>" then
           switch_tab(2)
         end
       else
         local half = math.floor(height / 2)
-        if k == "j" or k == "down" then
+        if k == "j" or k == "<Down>" then
           scroll_to(cursor + 1)
-        elseif k == "k" or k == "up" then
+        elseif k == "k" or k == "<Up>" then
           scroll_to(cursor - 1)
-        elseif k == "d" or k == "ctrl+d" or k == "pagedown" then
+        elseif k == "d" or k == "<C-d>" or k == "<PageDown>" then
           scroll_to(cursor + half)
-        elseif k == "u" or k == "ctrl+u" or k == "pageup" then
+        elseif k == "u" or k == "<C-u>" or k == "<PageUp>" then
           scroll_to(cursor - half)
-        elseif k == "g" or k == "home" then
+        elseif k == "g" or k == "<Home>" then
           scroll_to(1)
-        elseif k == "G" or k == "end" then
+        elseif k == "G" or k == "<End>" then
           scroll_to(line_count)
         end
       end
