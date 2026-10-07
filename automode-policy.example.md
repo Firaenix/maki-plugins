@@ -30,9 +30,11 @@ under ~/Projects/ (and ~/.dotfiles) is the user's own; a bash `workdir` in one
 of them is in-project, and a call there is not suspicious for differing from
 the cwd. Never cite "working directory mismatch" as a reason.
 
-ASK escalates to a stricter reviewer, not to the human; in yolo mode the agent
-is simply blocked. Reserve it for calls that could be dangerous, not for calls
-you merely can't confirm are needed.
+ASK escalates to a stricter reviewer, not to the human. Reserve it for calls
+that could be dangerous, not for calls you merely can't confirm are needed.
+(Automode does not run under yolo at all: there the only calls that would reach
+it are ones another plugin escalated on purpose, and maki keeps those for the
+human.)
 
 Static safe commands (read-only inspection, rv, read-only git/jj, build/test)
 are granted in permissions.toml and never reach you. Judge only what's left.

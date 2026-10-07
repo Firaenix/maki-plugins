@@ -1,9 +1,17 @@
 -- Automode: reviewer models answer the permission prompt for you, through
 -- maki's `permission.prompt` slot. A call that would prompt reaches the layer
--- below first, which walks the model chain and either answers with one of the
--- prompt's own options or passes the call on to the prompt. The security
+-- below first, which walks the model chain and either allows it, denies it with
+-- guidance, or passes it on to the prompt. Those three are the whole contract:
+-- a layer's verdict settles the call in front of it and records no rule, so
+-- nothing it allows widens into scopes no reviewer ever saw. The security
 -- prompt, the model calls, the timeout and the per-turn deny budget all live
 -- in this file; maki only knows a plugin answered, and marks the tool row.
+--
+-- Two kinds of call never arrive: ones the rules already settle, and ones
+-- another plugin escalated with `ask` — escalation sends a call to a human on
+-- purpose, so maki keeps it for them. Under yolo the escalated calls are the
+-- only ones that would reach a layer at all, which is why automode has nothing
+-- to do there.
 -- /automode toggles it, shows status, edits the chain, or inspects recent
 -- verdicts with the exact request each reviewer saw. Config lives here;
 -- picks persist to the state file. The policy the reviewers read is NOT
