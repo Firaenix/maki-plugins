@@ -25,6 +25,21 @@ When a bash call needs approval:
 | Plugin or core change | A pure plugin. Core changes only for what a plugin cannot do; none are needed. |
 | Keys while the prompt is open | The panel takes focus, answers `y`/`n` itself, and hands off on `Tab`. |
 
+## Amendment: the sentence goes in `description`
+
+The go/no-go check in the build failed for `intent`. maki sends every tool schema with
+`additionalProperties: false` (`maki-agent/src/tools/schema.rs`), so `claude-opus-5` never wrote an undeclared
+field, even with the hint in its system prompt. 0 of 2 calls carried one.
+
+The plugin now asks for bash's own `description` to be one sentence of 20–30 words on any non-trivial command. Under
+that hint, 3 of 3 calls carried 23–29 words. Consequences:
+
+- The input layer only reads the call; there is nothing to strip.
+- The chat row's label for those calls is the sentence, not 3–5 words.
+- The store still prefers an `intent` field if one ever arrives, then `description`.
+
+Wherever the sections below say `intent`, read `description`.
+
 ## Constraints found in maki (fork/tip, 0.6.3)
 
 - **Key routing.** While a permission prompt is open it consumes every key. The only
