@@ -161,4 +161,171 @@ case("a formatter result for a closed prompt is dropped", function()
   eq(prompts:current(), nil)
 end)
 
+-- View
+
+local View = require("../lua/describe_view")
+
+case("sanitize makes control bytes visible and expands tabs", function()
+  eq(View.sanitize("a\tb\r\nc\27[31md\7"), "a  b\nc\\x1b[31md\\x07")
+end)
+
+case("sanitize replaces bytes that are not UTF-8", function()
+  eq(View.sanitize("ok \255 end"), "ok ? end")
+end)
+
+case("wrap_words breaks at spaces and splits a word wider than the line", function()
+  same(View.wrap_words("one two three", 7), { "one two", "three" })
+  same(View.wrap_words("abcdefghij", 4), { "abcd", "efgh", "ij" })
+end)
+
+case("rows numbers source lines and wraps a long one under one number", function()
+  same(View.rows("short\n" .. string.rep("x", 10), 4), {
+    { lineno = 1, text = "shor" },
+    { text = "t" },
+    { lineno = 2, text = "xxxx" },
+    { text = "xxxx" },
+    { text = "xx" },
+  })
+end)
+
+case("content counts lines, drops trailing newlines and sizes the gutter", function()
+  local c = View.content({ sentence = "Lists files.", workdir = "/repo" }, "ls\npwd\n\n", 40)
+  eq(c.total, 2)
+  eq(c.gutter, 3)
+  same(c.sentence, { "Lists files." })
+  eq(c.where, "in /repo")
+end)
+
+local function numbered(n)
+  local lines = {}
+  for i = 1, n do
+    lines[i] = "echo " .. i
+  end
+  return table.concat(lines, "\n")
+end
+
+case("compact shows the sentence, the first rows and how much is left", function()
+  local c = View.content({ sentence = "Echoes numbers." }, numbered(12), 40)
+  local out = View.compact(c)
+  eq(out[1], "Echoes numbers.")
+  eq(out[2], "")
+  same(out[3], { { " 1  ", "dim" }, { "echo 1" } })
+  same(out[#out], { { "… 4 more lines, v shows all", "dim" } })
+  eq(#out, 2 + View.COMPACT_ROWS + 1)
+end)
+
+case("compact without a sentence starts with the code", function()
+  local c = View.content({}, "ls", 40)
+  same(View.compact(c), { { { "1  ", "dim" }, { "ls" } } })
+end)
+
+case("compact on one long line says the rest is in the full view", function()
+  local c = View.content({}, string.rep("x", 400), 20)
+  local out = View.compact(c)
+  same(out[#out], { { "… v shows all", "dim" } })
+end)
+
+case("compact uses highlighted spans when the panel supplies them", function()
+  local c = View.content({}, "ls", 40)
+  c.styled = { { { "ls", { fg = "#ff0000" } } } }
+  same(View.compact(c)[1], { { "1  ", "dim" }, { "ls", { fg = "#ff0000" } } })
+end)
+
+case("compact height fits the content and leaves room for the prompt", function()
+  eq(View.compact_height(6, 50), 8)
+  eq(View.compact_height(40, 30), 16)
+  eq(View.compact_height(40, 10), View.MIN_HEIGHT)
+end)
+
+case("titles say how long the script is and whether shfmt formatted it", function()
+  local c = View.content({}, numbered(30), 40)
+  eq(View.compact_title(c), " bash · 30 lines · as written ")
+  c.formatted = true
+  eq(View.compact_title(c), " bash · 30 lines · shfmt ")
+end)
+
+local function long_content()
+  return View.content({ sentence = "Echoes numbers." }, numbered(30), 40)
+end
+
+case("full shows the rows that fit under the header", function()
+  local c = long_content()
+  -- 12 rows tall: 2 border, 2 header (the sentence and a blank), 8 code rows.
+  local out = View.full(c, 12, 5)
+  eq(#out, 2 + 8)
+  same(out[3], { { " 5  ", "dim" }, { "echo 5" } })
+  eq(View.full_title(c, 5, 12), " bash · as written · rows 5-12 of 30 ")
+end)
+
+case("v opens the full view, and Esc or v goes back", function()
+  local c = long_content()
+  local state = { mode = "compact", top = 1, can_answer = true }
+  eq(View.handle_key(state, "v", c, 12), "redraw")
+  eq(state.mode, "full")
+  eq(View.handle_key(state, "<Esc>", c, 12), "redraw")
+  eq(state.mode, "compact")
+  View.handle_key(state, "v", c, 12)
+  eq(View.handle_key(state, "v", c, 12), "redraw")
+  eq(state.mode, "compact")
+end)
+
+case("scrolling moves by line and page and stops at both ends", function()
+  local c = long_content()
+  local state = { mode = "full", top = 1, can_answer = true }
+  eq(View.handle_key(state, "k", c, 12), nil)
+  eq(View.handle_key(state, "j", c, 12), "redraw")
+  eq(state.top, 2)
+  View.handle_key(state, "<PageDown>", c, 12)
+  eq(state.top, 10)
+  View.handle_key(state, "G", c, 12)
+  eq(state.top, 23)
+  eq(View.handle_key(state, "<Down>", c, 12), nil)
+  View.handle_key(state, "g", c, 12)
+  eq(state.top, 1)
+end)
+
+case("scroll keys do nothing in the compact view", function()
+  local c = long_content()
+  local state = { mode = "compact", top = 1, can_answer = true }
+  eq(View.handle_key(state, "j", c, 12), nil)
+  eq(state.top, 1)
+end)
+
+case("y, n and Tab act from either view", function()
+  local c = long_content()
+  for _, mode in ipairs({ "compact", "full" }) do
+    local state = { mode = mode, top = 1, can_answer = true }
+    eq(View.handle_key(state, "y", c, 12), "allow")
+    eq(View.handle_key(state, "n", c, 12), "deny")
+    eq(View.handle_key(state, "<Tab>", c, 12), "hand_off")
+    eq(View.handle_key(state, "<C-c>", c, 12), "hand_off")
+  end
+end)
+
+case("without answering, y and n do nothing and the footer drops them", function()
+  local c = long_content()
+  local state = { mode = "compact", top = 1, can_answer = false }
+  eq(View.handle_key(state, "y", c, 12), nil)
+  eq(View.handle_key(state, "n", c, 12), nil)
+  same(View.footer(state), { { "v", "full view" }, { "Tab", "more answers" } })
+end)
+
+case("the footer names the keys of each view", function()
+  same(
+    View.footer({ mode = "compact", can_answer = true }),
+    { { "y", "allow" }, { "n", "deny" }, { "v", "full view" }, { "Tab", "more answers" } }
+  )
+  same(View.footer({ mode = "full", can_answer = true }), {
+    { "y", "allow" },
+    { "n", "deny" },
+    { "j/k", "scroll" },
+    { "v", "back" },
+    { "Tab", "more answers" },
+  })
+end)
+
+case("a resize pulls the top back into range", function()
+  eq(View.clamp_top(23, long_content(), 30), 5)
+end)
+
 th.report()
