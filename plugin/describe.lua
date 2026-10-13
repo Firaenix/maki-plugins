@@ -14,12 +14,15 @@
 -- Without it the panel still shows, and `Tab` is the way on.
 
 local Store = require("describe_store")
+local Panel = require("describe_panel")
 
 local HINT = "- For any bash command beyond a single simple command, write `description` as one"
   .. " sentence of 20-30 words saying what the command does and why you are running it,"
   .. " instead of 3-5 words. The user reads it when approving the call."
 
 local calls = Store.calls()
+local prompts = Store.prompts()
+local panel = Panel.new(prompts, maki.session.answer_permission ~= nil)
 
 -- A failure in here must never block a call or a prompt: it is logged, and
 -- the native prompt carries on alone.
@@ -52,3 +55,41 @@ maki.api.create_autocmd("ToolDone", {
     calls:forget(data(ev).tool_id)
   end),
 })
+
+-- Every prompt is queued, describe's or not, so the panel tracks the request
+-- the native prompt is really showing.
+maki.api.create_autocmd("PermissionRequested", {
+  callback = guard("PermissionRequested", function(ev)
+    local d = data(ev)
+    local call = d.tool == "bash" and calls:get(d.tool_id) or nil
+    prompts:open(d.session_id, d.request_id, call)
+    if call then
+      panel:format(d.request_id, call.command)
+    end
+    panel:sync()
+  end),
+})
+
+-- Resolved by anyone: the user, a plugin, maki-hub, or a cancel.
+maki.api.create_autocmd("PermissionResolved", {
+  callback = guard("PermissionResolved", function(ev)
+    prompts:resolve(data(ev).request_id)
+    panel:sync()
+  end),
+})
+
+maki.api.create_autocmd("SessionFocusChanged", {
+  callback = guard("SessionFocusChanged", function(ev)
+    prompts:focus(data(ev).session_id)
+    panel:sync()
+  end),
+})
+
+maki.async.spawn(function()
+  for _, live in ipairs(maki.session.live() or {}) do
+    if live.focused then
+      prompts:focus(live.id)
+    end
+  end
+  panel:sync()
+end)
