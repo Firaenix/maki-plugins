@@ -63,10 +63,12 @@ function M:draw()
     lines = View.full(self.content, rows, self.state.top)
     config = { title = View.full_title(self.content, self.state.top, rows), height = "100%" }
   else
-    lines = View.compact(self.content)
+    local meta = self.item.meta or {}
+    local reserve = View.native_rows(meta.scopes, meta.reason)
+    lines = View.compact(self.content, math.max(View.MIN_HEIGHT, rows - reserve))
     config = {
       title = View.compact_title(self.content),
-      height = View.compact_height(#lines, rows),
+      height = View.compact_height(#lines, rows, reserve),
     }
   end
   config.footer = View.footer(self.state)

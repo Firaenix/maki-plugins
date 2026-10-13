@@ -10,7 +10,7 @@ M.COMPACT_ROWS = 8
 -- open_win sizes the outer box, so the border takes a row at each end.
 M.CHROME = 2
 -- Rows the compact panel leaves free for the native prompt, whose tool line
--- and key hints must stay visible below it.
+-- and key hints must stay visible below it, when nothing better is known.
 M.PROMPT_ROWS = 14
 M.MIN_HEIGHT = 5
 
@@ -145,9 +145,18 @@ local function code_line(content, i)
   return line
 end
 
-function M.compact(content)
+-- {max_height} is the outer height the panel may take. When the rows do not
+-- all fit, one goes to the note, so the user still learns there is more.
+function M.compact(content, max_height)
   local lines = header(content)
-  local shown = math.min(#content.rows, M.COMPACT_ROWS)
+  local cap = M.COMPACT_ROWS
+  if max_height then
+    local room = max_height - M.CHROME - #lines
+    if #content.rows > math.min(cap, room) then
+      cap = math.min(cap, room - 1)
+    end
+  end
+  local shown = math.min(#content.rows, math.max(1, cap))
   for i = 1, shown do
     lines[#lines + 1] = code_line(content, i)
   end
@@ -169,8 +178,18 @@ function M.compact(content)
   return lines
 end
 
-function M.compact_height(line_count, term_rows)
-  local room = term_rows - M.PROMPT_ROWS
+-- How tall the native prompt draws, from what PermissionRequested carries,
+-- plus the status bar under it. It counts every line the prompt may add:
+-- borders, blanks, tool, queue, a scope and a generalized allow line per
+-- scope, the untrusted-folder notices and two hint rows. Over by a row or two
+-- costs the panel that much; under covers the prompt's tool line.
+function M.native_rows(scope_count, has_reason)
+  local scopes = math.max(1, scope_count or 1)
+  return 12 + 2 * scopes + (has_reason and 1 or 0)
+end
+
+function M.compact_height(line_count, term_rows, reserve)
+  local room = term_rows - (reserve or M.PROMPT_ROWS)
   return math.max(M.MIN_HEIGHT, math.min(line_count + M.CHROME, room))
 end
 

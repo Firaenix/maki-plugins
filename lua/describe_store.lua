@@ -116,8 +116,9 @@ function M.prompts()
 end
 
 -- {call} is nil for a prompt describe has nothing to show for. It still takes
--- its place in the queue.
-function Prompts:open(session_id, request_id, call)
+-- its place in the queue. {meta} is what the native prompt was told about the
+-- call (`scopes`, a count, and `reason`), which sets how tall it draws.
+function Prompts:open(session_id, request_id, call, meta)
   if session_id == nil or request_id == nil then
     return
   end
@@ -130,6 +131,7 @@ function Prompts:open(session_id, request_id, call)
     request_id = request_id,
     session_id = session_id,
     call = call,
+    meta = meta,
     handed_off = false,
   }
 end

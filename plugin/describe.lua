@@ -60,7 +60,11 @@ maki.api.create_autocmd("PermissionRequested", {
   callback = guard("PermissionRequested", function(ev)
     local d = data(ev)
     local call = d.tool == "bash" and calls:get(d.tool_id) or nil
-    prompts:open(d.session_id, d.request_id, call)
+    -- A JSON null arrives as a sentinel, not nil, so test the types.
+    prompts:open(d.session_id, d.request_id, call, {
+      scopes = type(d.scopes) == "table" and #d.scopes or 1,
+      reason = type(d.reason) == "string",
+    })
     if call then
       panel:format(d.request_id, call.command)
     end

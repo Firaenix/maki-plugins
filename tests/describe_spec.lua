@@ -161,6 +161,13 @@ case("a formatter result for a closed prompt is dropped", function()
   eq(prompts:current(), nil)
 end)
 
+case("open keeps what the native prompt said about the call", function()
+  local prompts = Store.prompts()
+  prompts:focus("s1")
+  prompts:open("s1", 1, CALL, { scopes = 3, reason = true })
+  same(prompts:current().meta, { scopes = 3, reason = true })
+end)
+
 -- Layer
 
 case("the layer remembers the call as the inner layers left it", function()
@@ -287,6 +294,30 @@ case("compact height fits the content and leaves room for the prompt", function(
   eq(View.compact_height(6, 50), 8)
   eq(View.compact_height(40, 30), 16)
   eq(View.compact_height(40, 10), View.MIN_HEIGHT)
+end)
+
+case("the native prompt's height grows with its scopes and reason", function()
+  eq(View.native_rows(1, false), 14)
+  eq(View.native_rows(0, false), 14)
+  eq(View.native_rows(4, false), 20)
+  eq(View.native_rows(4, true), 21)
+end)
+
+case("compact height keeps clear of a taller native prompt", function()
+  eq(View.compact_height(12, 30, 20), 10)
+  eq(View.compact_height(12, 50, 20), 14)
+end)
+
+case("compact on a short terminal drops code rows to keep the note", function()
+  local c = View.content({ sentence = "Echoes numbers." }, numbered(12), 40)
+  local out = View.compact(c, 8)
+  eq(#out, 6)
+  same(out[#out], { { "… 9 more lines, v shows all", "dim" } })
+end)
+
+case("compact shows every row when they fit the budget", function()
+  local c = View.content({}, numbered(3), 40)
+  eq(#View.compact(c, 30), 3)
 end)
 
 case("titles say how long the script is and whether shfmt formatted it", function()
