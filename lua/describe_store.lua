@@ -92,6 +92,22 @@ function Calls:forget(tool_id)
   end
 end
 
+-- The tool.bash.input layer. It reads the call after `prev`, as the inner
+-- layers left it, so a layer that rewrites the command cannot leave the panel
+-- showing one command while another runs. Whatever prev answered goes back
+-- unchanged. {warn} hears a failure to remember, which never stops the call.
+function M.layer(calls, warn)
+  return function(prev, input, ctx)
+    local out = table.pack(prev(input, ctx))
+    local seen = out.n > 0 and type(out[1]) == "table" and out[1] or input
+    local ok, err = pcall(calls.remember, calls, ctx and ctx.tool_id, seen)
+    if not ok and warn then
+      warn(tostring(err))
+    end
+    return table.unpack(out, 1, out.n)
+  end
+end
+
 local Prompts = {}
 Prompts.__index = Prompts
 

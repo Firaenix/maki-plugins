@@ -161,6 +161,58 @@ case("a formatter result for a closed prompt is dropped", function()
   eq(prompts:current(), nil)
 end)
 
+-- Layer
+
+case("the layer remembers the call as the inner layers left it", function()
+  local calls = Store.calls()
+  local layer = Store.layer(calls)
+  local out = layer(function(input)
+    return { command = "rg foo", description = input.description }
+  end, { command = "grep -r foo", description = "Search" }, { tool_id = "t1" })
+  eq(out.command, "rg foo")
+  eq(calls:get("t1").command, "rg foo")
+end)
+
+case("the layer remembers the input when prev leaves it alone", function()
+  local calls = Store.calls()
+  local layer = Store.layer(calls)
+  local results = { layer(function() end, { command = "ls" }, { tool_id = "t1" }) }
+  eq(#results, 0)
+  eq(calls:get("t1").command, "ls")
+end)
+
+case("the layer hands back everything prev answered", function()
+  local layer = Store.layer(Store.calls())
+  local a, b = layer(function()
+    return nil, "stopped"
+  end, { command = "ls" }, { tool_id = "t1" })
+  eq(a, nil)
+  eq(b, "stopped")
+  local ask = { ask = "risky" }
+  local c, d = layer(function(input)
+    return input, ask
+  end, { command = "ls" }, { tool_id = "t2" })
+  eq(c.command, "ls")
+  eq(d, ask)
+end)
+
+case("a failure to remember is reported and the call goes on", function()
+  local warned
+  local broken = {
+    remember = function()
+      error("boom")
+    end,
+  }
+  local layer = Store.layer(broken, function(msg)
+    warned = msg
+  end)
+  local out = layer(function(input)
+    return input
+  end, { command = "ls" }, { tool_id = "t1" })
+  eq(out.command, "ls")
+  eq(type(warned) == "string" and warned:find("boom", 1, true) ~= nil, true)
+end)
+
 -- View
 
 local View = require("../lua/describe_view")

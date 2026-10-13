@@ -41,14 +41,12 @@ end
 
 maki.api.register_prompt_hint({ slot = "tool_usage", content = HINT })
 
--- The layer only reads the call and always reaches `prev`, so nothing here can
--- stop or change a call.
-maki.api.set_slot("tool.bash.input", function(prev, input, ctx)
-  guard("capture", function()
-    calls:remember(ctx.tool_id, input)
-  end)()
-  return prev(input, ctx)
-end)
+maki.api.set_slot(
+  "tool.bash.input",
+  Store.layer(calls, function(err)
+    maki.log.warn("describe: capture: " .. err)
+  end)
+)
 
 maki.api.create_autocmd("ToolDone", {
   callback = guard("ToolDone", function(ev)
