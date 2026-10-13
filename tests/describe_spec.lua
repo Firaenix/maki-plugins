@@ -376,6 +376,16 @@ case("the footer names the keys of each view", function()
   })
 end)
 
+case("before anything is drawn only Tab and Ctrl+C act", function()
+  local state = { mode = "compact", top = 1, can_answer = true }
+  eq(View.handle_key(state, "<Tab>", nil, 12), "hand_off")
+  eq(View.handle_key(state, "<C-c>", nil, 12), "hand_off")
+  eq(View.handle_key(state, "y", nil, 12), nil)
+  eq(View.handle_key(state, "n", nil, 12), nil)
+  eq(View.handle_key(state, "v", nil, 12), nil)
+  eq(state.mode, "compact")
+end)
+
 case("a resize pulls the top back into range", function()
   eq(View.clamp_top(23, long_content(), 30), 5)
 end)

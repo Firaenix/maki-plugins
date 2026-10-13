@@ -92,9 +92,6 @@ function M:answer(item, decision)
 end
 
 function M:key(key)
-  if not self.content then
-    return
-  end
   local rows = maki.ui.terminal_size().rows
   local action = View.handle_key(self.state, key, self.content, rows)
   if action == "redraw" then
@@ -105,6 +102,17 @@ function M:key(key)
   elseif action == "allow" or action == "deny" then
     self:answer(self.item, action)
   end
+end
+
+-- A broken panel must give the keys back: a focused window takes every key
+-- whether or not anything reads them. So the call is handed off and the window
+-- closed, and the native prompt carries on alone.
+function M:fail(err)
+  maki.log.warn("describe: panel: " .. tostring(err))
+  if self.item then
+    self.prompts:hand_off(self.item.request_id)
+  end
+  self:close()
 end
 
 function M:loop(win)
@@ -118,10 +126,16 @@ function M:loop(win)
     end
     -- Only the live window acts; one closed under a newer one just drains.
     if win == self.win and self.item then
-      if ev.type == "key" then
-        self:key(ev.key)
-      elseif ev.type == "resize" then
-        self:show(self.item)
+      local ok, err = pcall(function()
+        if ev.type == "key" then
+          self:key(ev.key)
+        elseif ev.type == "resize" then
+          self:show(self.item)
+        end
+      end)
+      if not ok then
+        self:fail(err)
+        return
       end
     end
   end
@@ -159,15 +173,25 @@ function M:show(item)
   self.gen = self.gen + 1
   local gen = self.gen
   maki.async.spawn(function()
-    local content = build(item)
-    if gen ~= self.gen or self.item ~= item then
+    local ok, err = pcall(function()
+      local content = build(item)
+      if gen ~= self.gen or self.item ~= item then
+        return
+      end
+      self.content = content
+      if not self.win then
+        self:open()
+      end
+      self:draw()
+    end)
+    if ok then
       return
     end
-    self.content = content
-    if not self.win then
-      self:open()
+    if gen == self.gen and self.item == item then
+      self:fail(err)
+    else
+      maki.log.warn("describe: stale build: " .. tostring(err))
     end
-    self:draw()
   end)
 end
 
@@ -198,24 +222,31 @@ end
 
 function M:format(request_id, command)
   maki.async.spawn(function()
-    local id = maki.fn.jobstart(SHFMT, { env = { DESCRIBE_CMD = command }, tail = SHFMT_TAIL })
-    if not id then
-      return
-    end
-    -- Straight after jobstart: a job waited on while it runs hands back every
-    -- line, while one that already exited answers only from its tail.
-    local res = maki.fn.jobwait(id, SHFMT_TIMEOUT_MS)
-    if not res then
-      pcall(maki.fn.jobstop, id)
-      return
-    end
-    if res.exit_code ~= 0 or res.truncated or (res.stdout or "") == "" then
-      return
-    end
-    if self.prompts:set_formatted(request_id, res.stdout) then
-      self:refresh(request_id)
+    local ok, err = pcall(self.run_shfmt, self, request_id, command)
+    if not ok then
+      maki.log.warn("describe: shfmt: " .. tostring(err))
     end
   end)
+end
+
+function M:run_shfmt(request_id, command)
+  local id = maki.fn.jobstart(SHFMT, { env = { DESCRIBE_CMD = command }, tail = SHFMT_TAIL })
+  if not id then
+    return
+  end
+  -- Straight after jobstart: a job waited on while it runs hands back every
+  -- line, while one that already exited answers only from its tail.
+  local res = maki.fn.jobwait(id, SHFMT_TIMEOUT_MS)
+  if not res then
+    pcall(maki.fn.jobstop, id)
+    return
+  end
+  if res.exit_code ~= 0 or res.truncated or (res.stdout or "") == "" then
+    return
+  end
+  if self.prompts:set_formatted(request_id, res.stdout) then
+    self:refresh(request_id)
+  end
 end
 
 return M

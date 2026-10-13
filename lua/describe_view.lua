@@ -229,16 +229,22 @@ function M.footer(state)
 end
 
 -- "allow", "deny" or "hand_off" for the panel to act on, "redraw" after the
--- view changed, or nil for a key that does nothing here.
+-- view changed, or nil for a key that does nothing here. {content} is nil
+-- while the panel has nothing drawn for the current call.
 function M.handle_key(state, key, content, height)
+  if key == "<Tab>" or key == "<C-c>" then
+    return "hand_off"
+  end
+  -- Nothing is drawn yet, or only a call the panel has moved off: an answer
+  -- now could settle a call the user never saw, but the way out always works.
+  if content == nil then
+    return nil
+  end
   if key == "y" or key == "n" then
     if not state.can_answer then
       return nil
     end
     return key == "y" and "allow" or "deny"
-  end
-  if key == "<Tab>" or key == "<C-c>" then
-    return "hand_off"
   end
   if state.mode == "compact" then
     if key == "v" then
