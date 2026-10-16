@@ -22,14 +22,12 @@ remove with `/packdel maki-plugins` after dropping the `pack.add` entry.
 | --- | --- | --- |
 | `plugin/automode.lua` | `/automode` | Reviewer models answer the permission prompt for calls that would otherwise prompt, as a layer on maki's `permission.prompt` slot. The plugin owns the security prompt, the timeout and the per-turn deny budget, and asks each model through a tool-less `maki.agent.session`. Toggle, status, model chain, and a verdict log showing the exact request each reviewer saw. |
 | `plugin/context.lua` | `/context` | Context-window usage panel: window and pricing from `maki.model.info`, with a `/v1/models` discovery fallback on older binaries. |
-| `plugin/describe.lua` | permission prompt | Asks the agent to write bash's `description` as one full sentence on non-trivial calls, and shows it in a focused panel over the permission prompt with the script formatted by `shfmt` and highlighted. `y`/`n` answer, `v` opens the whole script, `Tab` hands the keys back to the native prompt for its other answers. Batched calls keep the native prompt. Answering needs the fork's `maki.session.answer_permission`. |
 | `plugin/goal.lua` | `/goal`, `goal_complete` tool | Keeps the agent working across turns until the goal is met, the budget or round cap is hit, or you intervene. Stops the `question` tool through its `tool.question.input` slot while a goal runs. |
 | `plugin/pr_mention.lua` | `#` popup | Completes a PR/MR link from the repo in cwd via `gh` or `glab`. Fetches the open list once per directory (60s TTL) and narrows it in Lua as you type. |
 | `plugin/rv.lua` | `/rv` | In-maki review UI over the [`rv`](https://github.com/Firaenix/rv) CLI: file tree, diff pane, anchored comments, reply/resolve/abandon. |
 | `plugin/skills.lua` | `/skills` | Lists every skill the bundled `skill` tool would discover, without asking the model. |
 | `plugin/tool-alias.lua` | tool hook | Strips CLIProxyAPI's MCP alias decoration from tool names inside string payloads (`code_execution.code`, `batch.tool_calls[].tool`). |
 | `lua/input_popup.lua` | module | Trigger-character completion popup over `maki.ui.input`: placement, keys, local filtering. Used by `pr_mention`. |
-| `lua/describe_store.lua`, `lua/describe_view.lua`, `lua/describe_panel.lua` | modules | describe's memory of calls and open prompts, its layout and keys (both pure, unit-tested), and its window. |
 | `lua/model_select.lua` | module | Shared model catalog + picker used by `automode` and `context`. |
 
 ## Requirements
@@ -106,11 +104,3 @@ stylua .          # config in .stylua.toml
 Point maki at a local checkout instead of the pinned revision by cloning into
 `<maki-data>/site/pack/<group>/start/maki-plugins/`; see
 [Lua packages](https://maki.sh/docs/packages/).
-
-## Tests
-
-The pure modules have unit tests that run under the `luau` CLI, without a maki build:
-
-```bash
-nix run nixpkgs#luau -- tests/describe_spec.lua
-```
