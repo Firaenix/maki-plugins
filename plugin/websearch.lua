@@ -1,12 +1,13 @@
 -- Replaces maki's builtin websearch (hosted Exa AI) with a self-hosted
--- SearXNG instance, so searches run against our loopback container on the
--- framework instead of a third party. Ported from github.com/g4bwy/maki-plugins.
+-- SearXNG instance, so searches run against our container on the framework
+-- instead of a third party. Ported from github.com/g4bwy/maki-plugins.
 --
 -- Inert unless SEARXNG_URL is exported (the dotfiles' maki wrapper exports it
--- only on the host running the container): returning before register_tool
--- leaves the builtin Exa tool in place on every other machine, which is also
--- the only way to avoid the shadow-tool registration error while the host's
--- init.lua keeps the builtin enabled. The instance must list json in its
+-- on every host: the LAN address from the home network, the
+-- search.firaenix.me vhost elsewhere). Returning before register_tool leaves
+-- the builtin Exa tool in place wherever it is unset, which is also the only
+-- way to avoid the shadow-tool registration error while the host's init.lua
+-- keeps the builtin enabled. The instance must list json in its
 -- search.formats (hosts/nixos-framework/containers/searxng/settings.yml).
 --
 -- When the instance is down or errors, the handler transparently falls back
@@ -25,6 +26,13 @@ if not base_url or base_url == "" then
   return
 end
 base_url = base_url:gsub("/$", "")
+
+-- The LAN path needs no credential; the public vhost answers 401 without it
+-- (the dotfiles' Caddy reads the same key from agenix).
+local api_key = maki.uv.os_getenv("SEARXNG_KEY")
+if api_key == "" then
+  api_key = nil
+end
 
 local DEFAULT_NUM_RESULTS = 8
 local PROFILES = {
@@ -176,7 +184,11 @@ local function searxng_search(input, base_url)
     url = url .. "&language=" .. url_encode(input.language)
   end
 
-  local resp, err = maki.net.request(url, { timeout = profile.timeout_secs })
+  local req_opts = { timeout = profile.timeout_secs }
+  if api_key then
+    req_opts.headers = { authorization = "Bearer " .. api_key }
+  end
+  local resp, err = maki.net.request(url, req_opts)
   if not resp then
     return nil, tostring(err)
   end
