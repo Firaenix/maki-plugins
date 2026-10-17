@@ -25,6 +25,7 @@ remove with `/packdel maki-plugins` after dropping the `pack.add` entry.
 | `plugin/describe.lua` | permission prompt | Asks the agent to write bash's `description` as one full sentence on non-trivial calls, and shows it in a focused panel over the permission prompt with the script formatted by `shfmt` and highlighted. `y`/`n` answer, `v` opens the whole script, `Tab` hands the keys back to the native prompt for its other answers. Batched calls keep the native prompt. Answering needs the fork's `maki.session.answer_permission`. |
 | `plugin/goal.lua` | `/goal`, `goal_complete` tool | Keeps the agent working across turns until the goal is met, the budget or round cap is hit, or you intervene. Stops the `question` tool through its `tool.question.input` slot while a goal runs. |
 | `plugin/pr_mention.lua` | `#` popup | Completes a PR/MR link from the repo in cwd via `gh` or `glab`. Fetches the open list once per directory (60s TTL) and narrows it in Lua as you type. |
+| `plugin/remote.lua` | none | Heartbeats this maki and its live sessions to a [maki-hub](https://github.com/Firaenix/maki-hub) every 5 s, so the hub dashboard shows the machine. Off unless `MAKI_HUB_URL` and `MAKI_HUB_TOKEN` are set; `MAKI_HUB_INTERVAL` tunes the beat. A refused token stops the loop instead of hammering. |
 | `plugin/rv.lua` | `/rv` | In-maki review UI over the [`rv`](https://github.com/Firaenix/rv) CLI: file tree, diff pane, anchored comments, reply/resolve/abandon. |
 | `plugin/skills.lua` | `/skills` | Lists every skill the bundled `skill` tool would discover, without asking the model. |
 | `plugin/tool-alias.lua` | tool hook | Strips CLIProxyAPI's MCP alias decoration from tool names inside string payloads (`code_execution.code`, `batch.tool_calls[].tool`). |
@@ -41,6 +42,28 @@ remove with `/packdel maki-plugins` after dropping the `pack.add` entry.
   failing to load. `automode` needs the `permission.prompt` slot
   (tontinton/maki#1028); on a build without it the layer never fires.
 - `rv` on `PATH` for `/rv`; `gh` or `glab` for `#` completion.
+
+## Hub remote
+
+`plugin/remote.lua` registers this machine with a [maki-hub](https://github.com/
+Firaenix/maki-hub). Set the hub's origin and the host token from its Nix-declared
+registry in the environment maki runs in:
+
+```sh
+export MAKI_HUB_URL=https://hub.firaenix.me
+export MAKI_HUB_TOKEN=<host token from the hub's registry>
+```
+
+Nothing happens without both. The hub is expected public https — `maki.net.request`
+upgrades plain http and blocks private addresses, so a LAN hub additionally needs
+`net.allowed_private_hosts` in the maki config.
+
+Each reported session also long-polls the hub, so the hub can drive it: an ACP subset
+(`initialize`, `session/load`, `session/prompt`) answered from `TurnEnd`. Prompting needs
+the `agent` permission, granted in `plugin.toml`. `MAKI_HUB_CONTROL=0` keeps the plugin
+report-only, and `MAKI_HUB_INTERVAL` sets the beat spacing in seconds. The protocol is
+in the hub's `PROTOCOL.md`. Its `npm run test:e2e` runs this plugin in several real
+maki instances.
 
 ## Automode policy
 
