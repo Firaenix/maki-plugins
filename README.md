@@ -27,6 +27,7 @@ remove with `/packdel maki-plugins` after dropping the `pack.add` entry.
 | `plugin/rv.lua` | `/rv` | In-maki review UI over the [`rv`](https://github.com/Firaenix/rv) CLI: file tree, diff pane, anchored comments, reply/resolve/abandon. |
 | `plugin/skills.lua` | `/skills` | Lists every skill the bundled `skill` tool would discover, without asking the model. |
 | `plugin/tool-alias.lua` | tool hook | Strips CLIProxyAPI's MCP alias decoration from tool names inside string payloads (`code_execution.code`, `batch.tool_calls[].tool`). |
+| `plugin/websearch.lua` | `websearch` tool | Replaces maki's builtin Exa-backed websearch with a self-hosted [SearXNG](https://docs.searxng.org/) instance (port of [g4bwy/maki-plugins](https://github.com/g4bwy/maki-plugins/tree/master/websearch)). Inert unless `SEARXNG_URL` is exported, so hosts without an instance keep the builtin; where the plugin is active, instance errors fall through to the builtin's Exa MCP path, transparently. The host's init.lua must also set `plugins.websearch = { enabled = false }` and allowlist the instance in `net.allowed_private_hosts`. |
 | `lua/input_popup.lua` | module | Trigger-character completion popup over `maki.ui.input`: placement, keys, local filtering. Used by `pr_mention`. |
 | `lua/model_select.lua` | module | Shared model catalog + picker used by `automode` and `context`. |
 
