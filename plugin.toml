@@ -1,6 +1,8 @@
 min_maki_version = "0.5.0"
 
 [permissions]
+# Every key granted: remote's maki.session.answer_permission answers for the
+# user, which maki allows only a fully trusted plugin.
 fs_read = true
 fs_write = true
 net = true
