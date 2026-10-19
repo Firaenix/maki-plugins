@@ -70,6 +70,19 @@ case("a snapshot merges live state with the full read", function()
   })
 end)
 
+case("a snapshot carries the thinking level when known", function()
+  eq(Core.snapshot({ id = "s1" }, nil, "high").thinking, "high")
+  eq(Core.snapshot({ id = "s1" }, nil, nil).thinking, nil)
+  eq(Core.snapshot({ id = "s1" }, nil, 5).thinking, nil)
+end)
+
+case("the heartbeat body carries plugins_summary next to sessions", function()
+  local body = Core.heartbeat_body({ id = "i" }, {}, "EMPTY", { total = 3, errors = 1 })
+  same(body.plugins_summary, { total = 3, errors = 1 })
+  eq(body.sessions, "EMPTY")
+  eq(Core.heartbeat_body({ id = "i" }, {}, "EMPTY").plugins_summary, nil)
+end)
+
 case("a session closed mid-beat still reports its live fields", function()
   local snap = Core.snapshot({ id = "s1", title = "t", status = "idle" }, nil)
   eq(snap.id, "s1")
@@ -410,6 +423,57 @@ case("maki/cancel cancels the relayed session", function()
   eq(call(ctl, "maki/cancel", {}).error.code, -32000)
 end)
 
+local function send_now_effects()
+  local fx = full_effects()
+  fx.detached = true
+  fx.prompt = function(sid, text, force)
+    fx.prompts[#fx.prompts + 1] = { sid, text, force }
+    return force and "forced" or "queued"
+  end
+  fx.detach = function(sid)
+    if fx.refuse then
+      return nil, fx.refuse
+    end
+    fx.calls[#fx.calls + 1] = { "detach", sid }
+    return fx.detached
+  end
+  return fx
+end
+
+case("maki/prompt with force sends now", function()
+  local fx = send_now_effects()
+  local ctl = Core.controller(fx)
+  same(call(ctl, "maki/prompt", { text = "now", force = true }).result, { status = "forced" })
+  same(call(ctl, "maki/prompt", { text = "later" }).result, { status = "queued" })
+  same(fx.prompts, { { "s1", "now", true }, { "s1", "later", false } })
+  same(fx.dirty, { "s1", "s1" })
+end)
+
+case("maki/prompt with force needs send now and a boolean", function()
+  local fx = send_now_effects()
+  local ctl = Core.controller(fx)
+  eq(call(ctl, "maki/prompt", { text = "x", force = "yes" }).error.code, -32602)
+  fx.detach = nil
+  local out = call(ctl, "maki/prompt", { text = "x", force = true })
+  eq(out.error.code, -32601)
+  eq(#fx.prompts, 0, "an unforceable prompt is not quietly queued")
+  same(call(ctl, "maki/prompt", { text = "x", force = false }).result, { status = "queued" })
+end)
+
+case("maki/detach forces the queue of the relayed session", function()
+  local fx = send_now_effects()
+  local ctl = Core.controller(fx)
+  same(call(ctl, "maki/detach", {}).result, { detached = true })
+  same(fx.calls[1], { "detach", "s1" })
+  same(fx.dirty, { "s1" })
+  fx.detached = false
+  same(call(ctl, "maki/detach", {}).result, { detached = false })
+  fx.refuse = "gone"
+  eq(call(ctl, "maki/detach", {}).error.code, -32000)
+  fx.detach = nil
+  eq(call(ctl, "maki/detach", {}).error.code, -32601)
+end)
+
 -- Mirror
 
 case("clip leaves short strings and marks what it cut", function()
@@ -579,14 +643,37 @@ case("permission entries join the tool input by tool id", function()
 end)
 
 case("capabilities follow the session API that exists", function()
-  same(
-    Core.capabilities({}),
-    { cancel = false, answer_question = false, permission_decisions = { "allow", "deny" } }
-  )
+  same(Core.capabilities({}), {
+    cancel = false,
+    answer_question = false,
+    send_now = false,
+    permission_decisions = { "allow", "deny" },
+    commands = false,
+    command = false,
+    models = false,
+    model_set = false,
+    skills = false,
+    plugins = false,
+  })
   local caps = Core.capabilities({ cancel = print, answer_question = print })
   eq(caps.cancel, true)
   eq(caps.answer_question, true)
+  eq(caps.send_now, false)
+  eq(Core.capabilities({ detach = print }).send_now, true)
+  eq(Core.capabilities({ detach = true }).send_now, false, "only a function counts")
   eq(Core.capabilities(nil).cancel, false)
+end)
+
+case("capabilities advertise the catalog methods that exist", function()
+  local caps = Core.capabilities(
+    {},
+    { commands = true, models = true, model_set = false, plugins = 1 }
+  )
+  eq(caps.commands, true)
+  eq(caps.models, true)
+  eq(caps.model_set, false)
+  eq(caps.command, false)
+  eq(caps.plugins, false, "only a real true counts")
 end)
 
 case("the mirror body keeps the newest window and tags empties", function()
@@ -621,6 +708,122 @@ case("the mirror body carries open permissions and questions", function()
   eq(body.questions[1].tool_id, "q1")
 end)
 
+local function todo_call(input)
+  return {
+    role = "assistant",
+    kind = "turn",
+    content = { { type = "tool_use", id = "t", name = "todo_write", input = input } },
+  }
+end
+
+local function filler(n)
+  local out = {}
+  for i = 1, n do
+    out[i] = { role = "user", kind = "turn", content = { { type = "text", text = "m" .. i } } }
+  end
+  return out
+end
+
+local function never_read_all()
+  error("read the full history")
+end
+
+case("the latest todo_write wins and is normalised", function()
+  local window = {
+    todo_call({ todos = { { content = "old", status = "pending" } } }),
+    todo_call({
+      todos = {
+        { content = "a", status = "in_progress", priority = "high", extra = 1 },
+        { content = "b", status = "bogus" },
+        { status = "completed" },
+        "junk",
+      },
+    }),
+  }
+  local todos = Core.todo_tracker().observe("s1", window, never_read_all, "EMPTY")
+  same(todos, {
+    { content = "a", status = "in_progress", priority = "high" },
+    { content = "b", status = "pending" },
+  })
+  local cleared = Core.todo_tracker()
+    .observe("s1", { todo_call({ todos = {} }) }, never_read_all, "EMPTY")
+  eq(cleared, "EMPTY")
+end)
+
+case("a todo_write outside the mirror window is still found", function()
+  local all = filler(Core.MIRROR_LAST + 5)
+  table.insert(all, 1, todo_call({ todos = { { content = "early", status = "completed" } } }))
+  local window = { table.unpack(all, #all - Core.MIRROR_LAST + 1) }
+  local todos = Core.todo_tracker().observe("s1", window, function()
+    return all
+  end, "EMPTY")
+  same(todos, { { content = "early", status = "completed" } })
+end)
+
+case("malformed todo_write inputs are skipped for the previous list", function()
+  local window = {
+    todo_call({ todos = { { content = "kept", status = "pending" } } }),
+    todo_call({ todos = "nope" }),
+    todo_call("nope"),
+    todo_call(nil),
+  }
+  same(
+    Core.todo_tracker().observe("s1", window, never_read_all, "EMPTY"),
+    { { content = "kept", status = "pending" } }
+  )
+  eq(
+    Core.todo_tracker().observe("s1", { todo_call({}) }, function()
+      return {}
+    end, "EMPTY"),
+    nil
+  )
+end)
+
+case("the full history is read once per session, then the window suffices", function()
+  local tracker = Core.todo_tracker()
+  local reads = 0
+  local function read_all()
+    reads = reads + 1
+    return { todo_call({ todos = { { content = "early", status = "pending" } } }) }
+  end
+  local quiet = filler(3)
+  eq(tracker.observe("s1", quiet, read_all, "E")[1].content, "early")
+  eq(tracker.observe("s1", quiet, read_all, "E")[1].content, "early")
+  eq(reads, 1)
+  local newer = { todo_call({ todos = { { content = "new", status = "pending" } } }) }
+  eq(tracker.observe("s1", newer, read_all, "E")[1].content, "new")
+  eq(
+    tracker.observe("s1", quiet, read_all, "E")[1].content,
+    "new",
+    "remembered after scrolling out"
+  )
+  eq(reads, 1)
+  eq(
+    tracker.observe("s1", quiet, function()
+      return nil
+    end, "E")[1].content,
+    "new"
+  )
+  tracker.forget("s1")
+  tracker.observe("s1", quiet, read_all, "E")
+  eq(reads, 2)
+  eq(
+    tracker.observe("s2", quiet, function()
+      return nil
+    end, "E"),
+    nil,
+    "a failed read is retried"
+  )
+  eq(tracker.observe("s2", quiet, read_all, "E")[1].content, "early")
+end)
+
+case("the mirror body carries todos when given", function()
+  local caps = Core.capabilities({})
+  local todos = { { content = "a", status = "pending" } }
+  eq(Core.mirror_body("s1", {}, {}, caps, "EMPTY", todos).todos, todos)
+  eq(Core.mirror_body("s1", {}, {}, caps, "EMPTY").todos, nil)
+end)
+
 case("the mirror ticks fast while working or waiting on the user", function()
   eq(Core.mirror_interval("working", { permissions = "E", questions = "E" }), Core.MIRROR_FAST_MS)
   eq(Core.mirror_interval("idle", { permissions = {}, questions = {} }), Core.MIRROR_IDLE_MS)
@@ -642,6 +845,386 @@ case("the mirror gate sends on change, on the resend tick, and after a failure",
   eq(gate.due("s2", "a", 101), true, "sessions are tracked apart")
   gate.invalidate("s1")
   eq(gate.due("s1", "a", 101), true)
+end)
+
+-- Catalog methods: commands, models, skills, plugins
+
+case("the allowlist parses a comma list, defaulting when unset", function()
+  local def = Core.parse_allowlist(nil)
+  eq(def.compact, true)
+  eq(def.skills, true)
+  eq(def.yolo, nil)
+  same(Core.parse_allowlist(" /Compact, rv ,,bad name,x!"), { compact = true, rv = true })
+  same(Core.parse_allowlist(""), {})
+end)
+
+case("cmdline checks: allowlisted, no bang, starts with /", function()
+  local allow = Core.parse_allowlist("compact,btw")
+  eq(Core.check_cmdline("/compact keep the API notes", allow), "compact")
+  eq(Core.check_cmdline("/BTW what?", allow), "btw")
+  local function refused(cmdline, why)
+    local key, err = Core.check_cmdline(cmdline, allow)
+    eq(key, nil, cmdline)
+    eq(err:find(why, 1, true) ~= nil, true, err)
+  end
+  refused("/yolo", "not in remote_commands_allow")
+  refused("/model", "not in remote_commands_allow")
+  refused("compact", "starting with /")
+  refused("!rm -rf /", "starting with /")
+  refused("/btw hi\n!rm -rf /", "! lines")
+  refused("/compact!", "bang")
+  refused(nil, "starting with /")
+  refused("/btw " .. string.rep("x", Core.MAX_CMDLINE), "exceeds")
+end)
+
+case("the commands fallback lists allowlisted builtins plus web-native pickers", function()
+  local list = Core.command_list(nil, Core.parse_allowlist("compact,goal,rv"))
+  local names = {}
+  for i, c in ipairs(list) do
+    names[i] = c.name .. (c.interactive and "*" or "")
+    eq(c.allowed, true)
+  end
+  same(names, { "/compact", "/model*", "/thinking*", "/sessions*", "/goal", "/rv" })
+  eq(list[1].description, "Summarize and compact conversation history (optional guidance)")
+  eq(list[1].source, "builtin")
+  eq(list[5].plugin, "maki-plugins")
+end)
+
+case("an api command list is filtered by the allowlist", function()
+  local list = Core.command_list({
+    { name = "/compact", description = "c", source = "builtin", max_args = 1, interactive = false },
+    { name = "/yolo", description = "y", source = "builtin" },
+    {
+      name = "/rv",
+      description = "r",
+      source = "lua",
+      plugin = "maki-plugins",
+      argument_hint = "[args]",
+    },
+    { name = "/model", description = "m", source = "builtin", interactive = true },
+  }, Core.parse_allowlist("compact,rv"))
+  same(list, {
+    {
+      name = "/compact",
+      description = "c",
+      source = "builtin",
+      interactive = false,
+      allowed = true,
+    },
+    {
+      name = "/rv",
+      description = "r",
+      source = "lua",
+      plugin = "maki-plugins",
+      argument_hint = "[args]",
+      interactive = false,
+      allowed = true,
+    },
+    { name = "/model", description = "m", source = "builtin", interactive = true, allowed = true },
+  })
+end)
+
+local function catalog_effects()
+  local fx = full_effects()
+  fx.empty = "EMPTY"
+  fx.allow = Core.parse_allowlist("compact,btw")
+  fx.ran = {}
+  fx.run_command = function(sid, cmdline)
+    fx.ran[#fx.ran + 1] = { sid, cmdline }
+    return true
+  end
+  fx.model = {
+    spec = "anthropic/opus",
+    id = "opus",
+    provider = "anthropic",
+    thinking = "high",
+    thinking_options = { { name = "off" }, { name = "high", tokens = 32000 } },
+    fast = false,
+    supports_thinking = true,
+    supports_fast = true,
+  }
+  fx.model_get = function()
+    return fx.model
+  end
+  fx.models_available = function()
+    return { "anthropic/opus", "openrouter/meta/llama" }
+  end
+  fx.model_info = function(spec)
+    if spec == "anthropic/opus" then
+      return { spec = spec, id = "opus", provider = "anthropic", context_window = 200000 }
+    end
+    error("unknown")
+  end
+  fx.sets = {}
+  fx.model_set = function(sid, change)
+    fx.sets[#fx.sets + 1] = { sid, change }
+    fx.model.thinking = change.thinking or fx.model.thinking
+    return true
+  end
+  return fx
+end
+
+case("maki/commands falls back to the static table without the fork API", function()
+  local out = call(Core.controller(catalog_effects()), "maki/commands", {})
+  local names = {}
+  for i, c in ipairs(out.result.commands) do
+    names[i] = c.name
+  end
+  same(names, { "/compact", "/btw", "/model", "/thinking", "/sessions" })
+end)
+
+case("maki/commands uses maki.api.list_commands when present", function()
+  local fx = catalog_effects()
+  fx.commands = function()
+    return { { name = "/btw", description = "b" }, { name = "/exit", description = "x" } }
+  end
+  local out = call(Core.controller(fx), "maki/commands", {})
+  eq(#out.result.commands, 1)
+  eq(out.result.commands[1].name, "/btw")
+end)
+
+case("maki/command dispatches allowlisted lines and refuses the rest", function()
+  local fx = catalog_effects()
+  local ctl = Core.controller(fx)
+  same(call(ctl, "maki/command", { cmdline = "/compact" }).result, { dispatched = true })
+  same(fx.ran, { { "s1", "/compact" } })
+  same(fx.dirty, { "s1" })
+  eq(call(ctl, "maki/command", { cmdline = "/yolo" }).error.code, -32602)
+  eq(call(ctl, "maki/command", { cmdline = "!ls" }).error.code, -32602)
+  eq(#fx.ran, 1)
+  fx.run_command = function()
+    return nil, "no such session"
+  end
+  local refused = call(ctl, "maki/command", { cmdline = "/btw hi" })
+  eq(refused.error.code, -32000)
+  eq(refused.error.message, "command refused: no such session")
+  fx.run_command = nil
+  eq(call(Core.controller(fx), "maki/command", { cmdline = "/btw" }).error.code, -32601)
+end)
+
+case("maki/models lists specs with info and the session's current model", function()
+  local out = call(Core.controller(catalog_effects()), "maki/models", {})
+  same(out.result.current, {
+    spec = "anthropic/opus",
+    thinking = "high",
+    fast = false,
+    thinking_options = { { name = "off" }, { name = "high", tokens = 32000 } },
+    supports_thinking = true,
+    supports_fast = true,
+  })
+  same(out.result.models, {
+    { spec = "anthropic/opus", provider = "anthropic", id = "opus", context_window = 200000 },
+    { spec = "openrouter/meta/llama", provider = "openrouter", id = "meta/llama" },
+  })
+  local fx = catalog_effects()
+  fx.model_get = function()
+    return nil
+  end
+  eq(call(Core.controller(fx), "maki/models", {}).result.current, nil)
+  fx.models_available = nil
+  eq(call(Core.controller(fx), "maki/models", {}).error.code, -32601)
+end)
+
+case("maki/model_set validates, sets for the session and returns current", function()
+  local fx = catalog_effects()
+  local ctl = Core.controller(fx)
+  local out = call(ctl, "maki/model_set", { thinking = "off" })
+  eq(out.result.ok, true)
+  eq(out.result.current.thinking, "off")
+  same(fx.sets, { { "s1", { thinking = "off" } } })
+  eq(call(ctl, "maki/model_set", {}).error.code, -32602)
+  eq(call(ctl, "maki/model_set", { spec = "noslash" }).error.code, -32602)
+  eq(call(ctl, "maki/model_set", { fast = "yes" }).error.code, -32602)
+  fx.model_set = nil
+  eq(call(Core.controller(fx), "maki/model_set", { fast = true }).error.code, -32601)
+end)
+
+case("maki/skills and maki/plugins pass through, tagging empties", function()
+  local fx = catalog_effects()
+  fx.skills = function(sid)
+    eq(sid, "s1")
+    return { { name = "a", description = "d", path = "/p" } }
+  end
+  fx.plugins = function()
+    return { plugins = {}, source = "fallback" }
+  end
+  local ctl = Core.controller(fx)
+  same(
+    call(ctl, "maki/skills", {}).result,
+    { skills = { { name = "a", description = "d", path = "/p" } } }
+  )
+  same(call(ctl, "maki/plugins", {}).result, { plugins = "EMPTY", source = "fallback" })
+  fx.skills, fx.plugins = nil, nil
+  eq(call(Core.controller(fx), "maki/skills", {}).error.code, -32601)
+  eq(call(Core.controller(fx), "maki/plugins", {}).error.code, -32601)
+end)
+
+-- /remote-control
+
+case("parse_control_args defaults to status", function()
+  same(Core.parse_control_args({}), { cmd = "status" })
+  same(Core.parse_control_args(nil), { cmd = "status" })
+  same(Core.parse_control_args({ "" }), { cmd = "status" })
+end)
+
+case("parse_control_args takes toggle, logs and logs clear in any case", function()
+  same(Core.parse_control_args({ "Toggle" }), { cmd = "toggle" })
+  same(Core.parse_control_args({ "logs" }), { clear = false, cmd = "logs" })
+  same(Core.parse_control_args({ "logs", "CLEAR" }), { clear = true, cmd = "logs" })
+end)
+
+case("parse_control_args rejects unknown words and extras with the usage", function()
+  for _, fargs in ipairs({ { "bogus" }, { "status", "x" }, { "toggle", "now" }, { "logs", "all" } }) do
+    local parsed, usage = Core.parse_control_args(fargs)
+    eq(parsed, nil, table.concat(fargs, " "))
+    eq(usage, Core.CONTROL_USAGE)
+  end
+end)
+
+case("log_ring keeps the newest entries up to its cap, oldest first", function()
+  local ring = Core.log_ring(3)
+  for i = 1, 5 do
+    ring.push(0, "info", "m" .. i)
+  end
+  eq(ring.count(), 3)
+  local msgs = {}
+  for _, e in ipairs(ring.entries()) do
+    msgs[#msgs + 1] = e.msg
+  end
+  same(msgs, { "m3", "m4", "m5" })
+end)
+
+case("log_ring defaults to a cap of 200", function()
+  local ring = Core.log_ring()
+  for i = 1, 250 do
+    ring.push(0, "debug", tostring(i))
+  end
+  eq(ring.count(), 200)
+  eq(ring.entries()[1].msg, "51")
+  eq(ring.entries()[200].msg, "250")
+end)
+
+case("log_ring lines carry a time and the level", function()
+  local ring = Core.log_ring(5)
+  ring.push(0, "warn", "hub down")
+  local line = ring.lines()[1]
+  th.eq(line:match("^%d%d:%d%d:%d%d WARN hub down$") ~= nil, true, line)
+end)
+
+case("log_ring clear empties it and keeps working", function()
+  local ring = Core.log_ring(2)
+  ring.push(0, "info", "a")
+  ring.push(0, "info", "b")
+  ring.push(0, "info", "c")
+  ring.clear()
+  eq(ring.count(), 0)
+  same(ring.lines(), {})
+  ring.push(0, "info", "d")
+  eq(ring.entries()[1].msg, "d")
+end)
+
+case("mask_token shows a prefix, suffix and length, never the middle", function()
+  eq(Core.mask_token("abcdefghijklmnopqrstuvwxyz"), "abcd…yz (26 chars)")
+  eq(Core.mask_token("short"), "*****")
+  eq(Core.mask_token(""), "(unset)")
+  eq(Core.mask_token(nil), "(unset)")
+end)
+
+case("mask_url hides userinfo", function()
+  eq(Core.mask_url("https://user:secret@hub.example/x"), "https://***@hub.example/x")
+  eq(Core.mask_url("https://hub.example"), "https://hub.example")
+  eq(Core.mask_url(""), "(unset)")
+end)
+
+local function find_line(lines, label)
+  for _, l in ipairs(lines) do
+    if l:sub(1, #label + 1) == label .. " " then
+      return (l:sub(17):gsub("^%s+", ""))
+    end
+  end
+  return nil
+end
+
+case("status_lines explains a plugin that is not opted in", function()
+  local lines = Core.status_lines({
+    opted_in = false,
+    missing = { "MAKI_HUB_URL", "MAKI_HUB_TOKEN" },
+    url = "",
+    control = true,
+    fork = false,
+    allow = {},
+    now = 100,
+  })
+  eq(find_line(lines, "hub"), "(unset)")
+  eq(find_line(lines, "token"), "(unset)")
+  eq(find_line(lines, "state"), "off: MAKI_HUB_URL and MAKI_HUB_TOKEN not set")
+  eq(find_line(lines, "fork APIs"), "no")
+  eq(find_line(lines, "allowlist"), "(none)")
+  eq(find_line(lines, "last heartbeat"), nil)
+end)
+
+case("status_lines renders a running remote", function()
+  local token = "tok_0123456789abcdef"
+  local lines = Core.status_lines({
+    opted_in = true,
+    url = "https://hub.example",
+    token = token,
+    control = true,
+    fork = true,
+    allow = { new = true, compact = true },
+    now = 100,
+    interval = 5,
+    last_beat = { at = 97, status = 200 },
+    failures = 0,
+    live = 2,
+    polling = 2,
+    mirroring = 1,
+  })
+  eq(find_line(lines, "hub"), "https://hub.example")
+  eq(find_line(lines, "token"), "tok_…ef (20 chars)")
+  eq(find_line(lines, "state"), "running")
+  eq(find_line(lines, "control"), "enabled")
+  eq(find_line(lines, "last heartbeat"), "3s ago, HTTP 200")
+  eq(find_line(lines, "failures"), "0 in a row")
+  eq(find_line(lines, "poll loops"), "2")
+  eq(find_line(lines, "mirror loops"), "1")
+  eq(find_line(lines, "fork APIs"), "yes (maki.api.list_commands)")
+  eq(find_line(lines, "allowlist"), "compact, new")
+  for _, l in ipairs(lines) do
+    th.eq(l:find(token, 1, true), nil, "token leaked: " .. l)
+  end
+end)
+
+case("status_lines shows paused, refused and report-only states", function()
+  local base = {
+    opted_in = true,
+    url = "https://hub.example",
+    token = "x",
+    control = true,
+    now = 1000,
+    last_beat = { at = 880, err = "timed out" },
+    failures = 4,
+    polling = 1,
+    mirroring = 1,
+  }
+  base.paused = true
+  local lines = Core.status_lines(base)
+  eq(find_line(lines, "state"), "paused")
+  eq(find_line(lines, "poll loops"), "1 (paused)")
+  eq(find_line(lines, "last heartbeat"), "2m ago, error: timed out")
+  eq(find_line(lines, "failures"), "4 in a row")
+  base.paused, base.token_refused = false, true
+  base.last_beat = { at = 1000, status = 401 }
+  lines = Core.status_lines(base)
+  eq(find_line(lines, "state"), "stopped: hub refused the token (toggle to retry)")
+  eq(find_line(lines, "last heartbeat"), "0s ago, HTTP 401")
+  base.token_refused, base.control = false, false
+  lines = Core.status_lines(base)
+  eq(find_line(lines, "control"), "disabled (MAKI_HUB_CONTROL=0)")
+  eq(find_line(lines, "poll loops"), "off")
+  eq(find_line(lines, "last heartbeat"), "0s ago, HTTP 401")
+  base.last_beat = {}
+  eq(find_line(Core.status_lines(base), "last heartbeat"), "never")
 end)
 
 th.report()

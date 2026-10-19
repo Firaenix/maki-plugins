@@ -31,8 +31,9 @@ function M.parse_head(text)
 end
 
 -- One live session merged with its full read, which may be nil when the session
--- closed between live() and read().
-function M.snapshot(live, read)
+-- closed between live() and read(). {thinking} is the session's thinking level
+-- when known (string), else nil.
+function M.snapshot(live, read, thinking)
   return {
     id = live.id,
     title = live.title,
@@ -44,6 +45,7 @@ function M.snapshot(live, read)
     context_size = read and read.context_size or nil,
     context_window = read and read.context_window or nil,
     focused = live.focused == true,
+    thinking = type(thinking) == "string" and thinking or nil,
   }
 end
 
@@ -51,7 +53,8 @@ end
 -- cuts the session the user is looking at. An empty list must encode as a JSON
 -- array, which a fresh Lua {} cannot do; the caller hands in a tagged one
 -- (maki.json.decode("[]") carries the array metatable through to encode).
-function M.heartbeat_body(instance, snapshots, empty_array)
+-- {plugins_summary} is {total, errors}, or nil when unknown.
+function M.heartbeat_body(instance, snapshots, empty_array, plugins_summary)
   local list = {}
   for i, s in ipairs(snapshots) do
     list[i] = s
@@ -67,7 +70,7 @@ function M.heartbeat_body(instance, snapshots, empty_array)
   if #list == 0 then
     list = empty_array
   end
-  return { instance = instance, sessions = list }
+  return { instance = instance, sessions = list, plugins_summary = plugins_summary }
 end
 
 -- Mirror: POST /api/relay/mirror carries a session's recent transcript plus the
@@ -295,18 +298,215 @@ function M.permission_entries(open, messages, empty, limit)
   return list_or(out, empty)
 end
 
-function M.capabilities(session_api)
+-- {features} flags the maki/* methods this maki can answer: commands,
+-- command, models, model_set, skills, plugins. A missing flag reads false.
+function M.capabilities(session_api, features)
   local api = type(session_api) == "table" and session_api or {}
+  local f = type(features) == "table" and features or {}
   return {
     cancel = api.cancel ~= nil,
     answer_question = api.answer_question ~= nil,
+    -- maki.session.detach ships with prompt's force flag, so one probe covers both.
+    send_now = type(api.detach) == "function",
     permission_decisions = M.PERMISSION_DECISIONS,
+    commands = f.commands == true,
+    command = f.command == true,
+    models = f.models == true,
+    model_set = f.model_set == true,
+    skills = f.skills == true,
+    plugins = f.plugins == true,
+  }
+end
+
+-- Remote slash commands: only names on the allowlist reach run_command, and
+-- only those (plus the web-native pickers below) are ever listed to the hub.
+M.DEFAULT_COMMANDS_ALLOW = "compact,new,btw,fast,workflow,reload,goal,skills"
+M.MAX_CMDLINE = 4096
+-- Interactive pickers the hub answers with its own UI. Listed, never run.
+M.WEB_NATIVE = { model = true, thinking = true, sessions = true }
+
+-- Used when maki has no maki.api.list_commands: descriptions from maki's
+-- palette (maki-ui/src/components/command.rs) and the plugins' own.
+M.FALLBACK_COMMANDS = {
+  {
+    name = "/compact",
+    description = "Summarize and compact conversation history (optional guidance)",
+    source = "builtin",
+  },
+  { name = "/new", description = "Start a new session", source = "builtin" },
+  {
+    name = "/btw",
+    description = "Ask a quick question (no tools, no history pollution)",
+    source = "builtin",
+  },
+  {
+    name = "/fast",
+    description = "Toggle fast mode (Anthropic Opus or Codex subscription models)",
+    source = "builtin",
+  },
+  {
+    name = "/workflow",
+    description = "Toggle workflow mode (task callable inside code_execution)",
+    source = "builtin",
+  },
+  { name = "/reload", description = "Reload plugins and config", source = "builtin" },
+  { name = "/model", description = "Switch model", source = "builtin", interactive = true },
+  {
+    name = "/thinking",
+    description = "Extended thinking: pick an effort level, or set one directly",
+    source = "lua",
+    plugin = "thinking",
+    interactive = true,
+  },
+  {
+    name = "/sessions",
+    description = "Browse and switch sessions",
+    source = "lua",
+    plugin = "sessions",
+    interactive = true,
+  },
+  {
+    name = "/goal",
+    description = "Set a goal the agent pursues across turns; bare /goal manages it, 'config' toggles constraints",
+    source = "lua",
+    plugin = "maki-plugins",
+  },
+  {
+    name = "/skills",
+    description = "List every skill the `skill` tool can load in this session.",
+    source = "lua",
+    plugin = "maki-plugins",
+  },
+}
+
+local function command_key(name)
+  if type(name) ~= "string" then
+    return nil
+  end
+  local key = name:gsub("^/", ""):lower()
+  return key ~= "" and key or nil
+end
+
+-- "compact, /New,,goal" -> {compact=true, new=true, goal=true}. nil means
+-- the default list; an empty string allows nothing.
+function M.parse_allowlist(s)
+  if type(s) ~= "string" then
+    s = M.DEFAULT_COMMANDS_ALLOW
+  end
+  local set = {}
+  for part in s:gmatch("[^,]+") do
+    local key = command_key((part:gsub("^%s+", ""):gsub("%s+$", "")))
+    if key and not key:find("[%s!]") then
+      set[key] = true
+    end
+  end
+  return set
+end
+
+-- maki/commands entries from maki.api.list_commands() output, or from
+-- FALLBACK_COMMANDS when {listed} is nil. Allowlisted names missing from the
+-- fallback table still get a bare entry so the hub can run them.
+function M.command_list(listed, allow)
+  local from_api = type(listed) == "table"
+  local seen, out = {}, {}
+  for _, c in ipairs(from_api and listed or M.FALLBACK_COMMANDS) do
+    local key = type(c) == "table" and command_key(c.name)
+    if key and not seen[key] and (allow[key] or M.WEB_NATIVE[key]) then
+      seen[key] = true
+      out[#out + 1] = {
+        name = "/" .. key,
+        description = type(c.description) == "string" and c.description or "",
+        source = c.source or "builtin",
+        plugin = c.plugin,
+        argument_hint = c.argument_hint,
+        interactive = c.interactive == true or (M.WEB_NATIVE[key] == true and not allow[key]),
+        allowed = true,
+      }
+    end
+  end
+  if not from_api then
+    local extra = {}
+    for key in pairs(allow) do
+      if not seen[key] then
+        extra[#extra + 1] = key
+      end
+    end
+    table.sort(extra)
+    for _, key in ipairs(extra) do
+      out[#out + 1] = {
+        name = "/" .. key,
+        description = "",
+        source = "lua",
+        interactive = false,
+        allowed = true,
+      }
+    end
+  end
+  return out
+end
+
+-- The allowlist key of {cmdline}, or nil and why it is refused. A bang (`!`
+-- line, or `/name!`) is refused whatever the allowlist says.
+function M.check_cmdline(cmdline, allow)
+  if type(cmdline) ~= "string" or cmdline:sub(1, 1) ~= "/" then
+    return nil, "cmdline must be a string starting with /"
+  end
+  if #cmdline > M.MAX_CMDLINE then
+    return nil, "cmdline exceeds " .. M.MAX_CMDLINE .. " bytes"
+  end
+  for line in cmdline:gmatch("[^\n]+") do
+    if line:match("^%s*!") then
+      return nil, "! lines are never run remotely"
+    end
+  end
+  local name = cmdline:match("^/(%S+)")
+  if not name or name:find("!", 1, true) then
+    return nil, "bang commands are never run remotely"
+  end
+  local key = name:lower()
+  if not allow[key] then
+    return nil, "/" .. key .. " is not in remote_commands_allow"
+  end
+  return key
+end
+
+-- maki.model.get() -> the maki/models `current` shape, or nil.
+function M.model_current(m, empty)
+  if type(m) ~= "table" or type(m.spec) ~= "string" then
+    return nil
+  end
+  local options = {}
+  for _, o in ipairs(type(m.thinking_options) == "table" and m.thinking_options or {}) do
+    if type(o) == "table" and o.name ~= nil then
+      options[#options + 1] = { name = tostring(o.name), tokens = tonumber(o.tokens) }
+    end
+  end
+  return {
+    spec = m.spec,
+    thinking = m.thinking ~= nil and tostring(m.thinking) or nil,
+    fast = m.fast == true,
+    thinking_options = list_or(options, empty),
+    supports_thinking = m.supports_thinking == true,
+    supports_fast = m.supports_fast == true,
+  }
+end
+
+-- One maki/models entry from an available() spec and its info(), if any.
+function M.model_entry(spec, info)
+  local i = type(info) == "table" and info or {}
+  local provider, id = spec:match("^([^/]+)/(.+)$")
+  return {
+    spec = spec,
+    provider = i.provider or provider or "",
+    id = i.id or id or spec,
+    name = type(i.name) == "string" and i.name or nil,
+    context_window = tonumber(i.context_window),
   }
 end
 
 -- Body of POST /api/relay/mirror. messages() reports no transcript length, so
 -- offset stays 0 and the hub keys on the window it is sent.
-function M.mirror_body(session_id, messages, open_permissions, capabilities, empty)
+function M.mirror_body(session_id, messages, open_permissions, capabilities, empty, todos)
   local list = type(messages) == "table" and messages or {}
   local first = math.max(#list - M.MIRROR_LAST + 1, 1)
   local out = {}
@@ -320,7 +520,78 @@ function M.mirror_body(session_id, messages, open_permissions, capabilities, emp
     permissions = M.permission_entries(open_permissions, list, empty),
     questions = M.open_questions(list, empty),
     capabilities = capabilities,
+    todos = todos,
   }
+end
+
+local TODO_STATUSES = { pending = true, in_progress = true, completed = true, cancelled = true }
+
+-- A todo_write input as [{content, status, priority?}], or nil when it is not
+-- a list: maki rejects such a call, so it never replaced the list.
+function M.todo_entries(input, empty)
+  local items = type(input) == "table" and input.todos
+  if type(items) ~= "table" then
+    return nil
+  end
+  local out = {}
+  for _, item in ipairs(items) do
+    if type(item) == "table" and type(item.content) == "string" then
+      out[#out + 1] = {
+        content = M.clip(item.content),
+        status = TODO_STATUSES[item.status] and item.status or "pending",
+        priority = type(item.priority) == "string" and item.priority or nil,
+      }
+    end
+  end
+  return list_or(out, empty)
+end
+
+-- Newest well-formed todo_write in `messages`, or nil.
+local function latest_todos(messages, empty)
+  for i = #messages, 1, -1 do
+    local content = type(messages[i]) == "table" and messages[i].content
+    if type(content) == "table" then
+      for j = #content, 1, -1 do
+        local b = content[j]
+        if type(b) == "table" and b.type == "tool_use" and b.name == "todo_write" then
+          local todos = M.todo_entries(b.input, empty)
+          if todos then
+            return todos
+          end
+        end
+      end
+    end
+  end
+  return nil
+end
+
+-- Latest todo list per session over its whole history. The mirror window holds
+-- the newest messages, so a call in it is the latest; only a session whose
+-- window has none pays for one full-history read, after which every later
+-- call lands in the window before it can scroll out.
+function M.todo_tracker()
+  local known = {}
+  local tracker = {}
+
+  function tracker.observe(session_id, window, read_all, empty)
+    local found = latest_todos(type(window) == "table" and window or {}, empty)
+    if found then
+      known[session_id] = { todos = found }
+    elseif not known[session_id] then
+      local all = read_all()
+      if type(all) ~= "table" then
+        return nil
+      end
+      known[session_id] = { todos = latest_todos(all, empty) }
+    end
+    return known[session_id].todos
+  end
+
+  function tracker.forget(session_id)
+    known[session_id] = nil
+  end
+
+  return tracker
 end
 
 -- Fast while the session works or waits on the user, so the hub sees prompts
@@ -362,16 +633,28 @@ end
 
 -- Control: the hub speaks a subset of ACP (JSON-RPC 2.0) to each live session
 -- through the relay. Effects are injected so the routing stays testable:
---   effects.prompt(session_id, text) -> "started"|"queued" | nil, err
+--   effects.prompt(session_id, text, force) -> "started"|"queued"|"forced" | nil, err
 --   effects.messages(session_id)     -> recent transcript, oldest first | nil
 -- and, for the maki/* extensions that drive the UI directly:
 --   effects.answer_permission(request_id, decision, guidance) -> bool | nil, err
 --   effects.permission_open(session_id, request_id) -> bool        (optional)
 --   effects.answer_question(session_id, tool_id, answer) -> bool | nil, err
 --   effects.cancel(session_id)       -> bool | nil, err
+--   effects.detach(session_id)       -> bool | nil, err  (send now; gates force)
 --   effects.capabilities()           -> as M.capabilities
 --   effects.touched(session_id)      after an action, so the mirror resends
--- answer_question and cancel are nil on a maki without those APIs.
+-- answer_question, cancel and detach are nil on a maki without those APIs. The
+-- catalog methods take, each optional (nil answers -32601):
+--   effects.allow                    allowlist set, as M.parse_allowlist
+--   effects.commands()               maki.api.list_commands() | nil (fallback)
+--   effects.run_command(session_id, cmdline) -> true | nil, err
+--   effects.model_get(session_id)    maki.model.get() shape | nil
+--   effects.models_available()       {"provider/id", ...}
+--   effects.model_info(spec)         maki.model.info() | nil
+--   effects.model_set(session_id, {spec, thinking?, fast?}) -> true | nil, err
+--   effects.skills(session_id)       {{name, description, path}}
+--   effects.plugins()                {plugins, source}, as plugins_core.collect
+--   effects.empty                    tagged empty array (default {})
 M.PROTOCOL_VERSION = 1
 
 local STOP_REASONS = {
@@ -486,7 +769,15 @@ function M.controller(effects)
     if type(params.text) ~= "string" or params.text:match("^%s*$") then
       return failure(id, -32602, "text must be a non-empty string")
     end
-    local status, err = attempt(effects.prompt, session_id, params.text)
+    if params.force ~= nil and type(params.force) ~= "boolean" then
+      return failure(id, -32602, "force must be a boolean")
+    end
+    local force = params.force == true
+    -- An older maki would quietly queue instead, so say so rather than lie.
+    if force and not effects.detach then
+      return failure(id, -32601, "send now is not supported by this maki")
+    end
+    local status, err = attempt(effects.prompt, session_id, params.text, force)
     if not status then
       return failure(id, -32000, "prompt refused: " .. tostring(err))
     end
@@ -560,6 +851,115 @@ function M.controller(effects)
     return result(id, { landed = landed == true })
   end
 
+  local empty = effects.empty or {}
+  local allow = effects.allow or M.parse_allowlist(nil)
+
+  maki_methods["maki/commands"] = function(_, id)
+    local listed = nil
+    if effects.commands then
+      local ok, v = pcall(effects.commands)
+      listed = ok and type(v) == "table" and v or nil
+    end
+    return result(id, { commands = list_or(M.command_list(listed, allow), empty) })
+  end
+
+  maki_methods["maki/command"] = function(session_id, id, params)
+    if not effects.run_command then
+      return failure(id, -32601, "not supported by this maki")
+    end
+    local key, why = M.check_cmdline(params.cmdline, allow)
+    if not key then
+      return failure(id, -32602, why)
+    end
+    local ok, err = attempt(effects.run_command, session_id, params.cmdline)
+    if not ok then
+      return failure(id, -32000, "command refused: " .. tostring(err))
+    end
+    touched(session_id)
+    return result(id, { dispatched = true })
+  end
+
+  local function current_model(session_id)
+    if not effects.model_get then
+      return nil
+    end
+    local ok, m = pcall(effects.model_get, session_id)
+    return ok and M.model_current(m, empty) or nil
+  end
+
+  maki_methods["maki/models"] = function(session_id, id)
+    if not effects.models_available then
+      return failure(id, -32601, "not supported by this maki")
+    end
+    local specs, err = attempt(effects.models_available)
+    if not specs then
+      return failure(id, -32000, "model list failed: " .. tostring(err))
+    end
+    local models = {}
+    for _, spec in ipairs(specs) do
+      if type(spec) == "string" then
+        local info = nil
+        if effects.model_info then
+          local ok, v = pcall(effects.model_info, spec)
+          info = ok and v or nil
+        end
+        models[#models + 1] = M.model_entry(spec, info)
+      end
+    end
+    return result(id, { current = current_model(session_id), models = list_or(models, empty) })
+  end
+
+  maki_methods["maki/model_set"] = function(session_id, id, params)
+    if not effects.model_set then
+      return failure(id, -32601, "per-session model switching needs a newer maki")
+    end
+    local spec, thinking, fast = params.spec, params.thinking, params.fast
+    if spec ~= nil and (type(spec) ~= "string" or not spec:match("^[^/%s]+/%S+$")) then
+      return failure(id, -32602, "spec must be a provider/id string")
+    end
+    if thinking ~= nil and type(thinking) ~= "string" and type(thinking) ~= "number" then
+      return failure(id, -32602, "thinking must be a string or number")
+    end
+    if fast ~= nil and type(fast) ~= "boolean" then
+      return failure(id, -32602, "fast must be a boolean")
+    end
+    if spec == nil and thinking == nil and fast == nil then
+      return failure(id, -32602, "nothing to set: pass spec, thinking or fast")
+    end
+    local ok, err =
+      attempt(effects.model_set, session_id, { spec = spec, thinking = thinking, fast = fast })
+    if not ok then
+      return failure(id, -32000, "model change refused: " .. tostring(err))
+    end
+    touched(session_id)
+    return result(id, { ok = true, current = current_model(session_id) })
+  end
+
+  maki_methods["maki/skills"] = function(session_id, id)
+    if not effects.skills then
+      return failure(id, -32601, "not supported by this maki")
+    end
+    local skills, err = attempt(effects.skills, session_id)
+    if not skills then
+      return failure(id, -32000, "skill discovery failed: " .. tostring(err))
+    end
+    return result(id, { skills = list_or(skills, empty) })
+  end
+
+  maki_methods["maki/plugins"] = function(_, id)
+    if not effects.plugins then
+      return failure(id, -32601, "not supported by this maki")
+    end
+    local res, err = attempt(effects.plugins)
+    if type(res) ~= "table" then
+      return failure(id, -32000, "plugin list failed: " .. tostring(err))
+    end
+    return result(id, {
+      plugins = list_or(type(res.plugins) == "table" and res.plugins or {}, empty),
+      source = res.source or "fallback",
+    })
+  end
+
   maki_methods["maki/cancel"] = function(session_id, id)
     if not effects.cancel then
       return failure(id, -32601, "not supported by this maki")
@@ -570,6 +970,20 @@ function M.controller(effects)
     end
     touched(session_id)
     return result(id, { cancelled = cancelled == true })
+  end
+
+  -- Forces what is already queued; false when there is nothing to force or
+  -- the turn waits on a permission prompt or question.
+  maki_methods["maki/detach"] = function(session_id, id)
+    if not effects.detach then
+      return failure(id, -32601, "not supported by this maki")
+    end
+    local detached, err = attempt(effects.detach, session_id)
+    if detached == nil then
+      return failure(id, -32000, "detach refused: " .. tostring(err))
+    end
+    touched(session_id)
+    return result(id, { detached = detached == true })
   end
 
   function ctl.pending(session_id)
@@ -663,6 +1077,160 @@ function M.controller(effects)
   end
 
   return ctl
+end
+
+-- /remote-control
+
+M.LOG_CAP = 200
+M.CONTROL_USAGE = "usage: /remote-control [status|toggle|logs [clear]]"
+
+-- fargs from register_command -> {cmd = "status"|"toggle"|"logs", clear?},
+-- or nil and the usage line.
+function M.parse_control_args(fargs)
+  local words = {}
+  for _, w in ipairs(fargs or {}) do
+    if w ~= "" then
+      words[#words + 1] = w:lower()
+    end
+  end
+  local cmd, rest = words[1] or "status", #words - 1
+  if (cmd == "status" or cmd == "toggle") and rest <= 0 then
+    return { cmd = cmd }
+  end
+  if cmd == "logs" and rest <= 0 then
+    return { cmd = "logs", clear = false }
+  end
+  if cmd == "logs" and rest == 1 and words[2] == "clear" then
+    return { cmd = "logs", clear = true }
+  end
+  return nil, M.CONTROL_USAGE
+end
+
+-- Last {cap} log lines, oldest first. {at} is epoch seconds.
+function M.log_ring(cap)
+  cap = cap or M.LOG_CAP
+  local entries, first, count = {}, 1, 0
+  local ring = {}
+
+  function ring.push(at, level, msg)
+    local slot = (first + count - 1) % cap + 1
+    entries[slot] = { at = at, level = level, msg = msg }
+    if count < cap then
+      count = count + 1
+    else
+      first = first % cap + 1
+    end
+  end
+
+  function ring.entries()
+    local out = {}
+    for i = 0, count - 1 do
+      out[#out + 1] = entries[(first + i - 1) % cap + 1]
+    end
+    return out
+  end
+
+  function ring.lines()
+    local out = {}
+    for _, e in ipairs(ring.entries()) do
+      out[#out + 1] = os.date("%H:%M:%S", e.at) .. " " .. e.level:upper() .. " " .. e.msg
+    end
+    return out
+  end
+
+  function ring.count()
+    return count
+  end
+
+  function ring.clear()
+    entries, first, count = {}, 1, 0
+  end
+
+  return ring
+end
+
+-- Enough of the token to tell two apart, never enough to use one.
+function M.mask_token(token)
+  if type(token) ~= "string" or token == "" then
+    return "(unset)"
+  end
+  if #token < 12 then
+    return string.rep("*", #token)
+  end
+  return token:sub(1, 4) .. "…" .. token:sub(-2) .. " (" .. #token .. " chars)"
+end
+
+-- Strips any user:pass@ from the URL.
+function M.mask_url(url)
+  if type(url) ~= "string" or url == "" then
+    return "(unset)"
+  end
+  return (url:gsub("^(%a[%w+.-]*://)[^/@]*@", "%1***@"))
+end
+
+local function ago(now, at)
+  if not at then
+    return "never"
+  end
+  local s = math.max(0, now - at)
+  if s < 60 then
+    return s .. "s ago"
+  elseif s < 3600 then
+    return math.floor(s / 60) .. "m ago"
+  end
+  return math.floor(s / 3600) .. "h ago"
+end
+
+local function sorted_keys(set)
+  local out = {}
+  for k in pairs(set or {}) do
+    out[#out + 1] = k
+  end
+  table.sort(out)
+  return out
+end
+
+-- Status float lines from a plain snapshot of the plugin's state:
+-- {url, token, control, now, fork, allow (set)} always; opted_in = false adds
+-- {missing = {env names}}; otherwise {paused, token_refused, interval,
+-- last_beat = {at, status?, err?}, failures, live, polling, mirroring}.
+function M.status_lines(s)
+  local lines = {}
+  local function add(label, value)
+    lines[#lines + 1] = string.format("%-16s %s", label, tostring(value))
+  end
+  add("hub", M.mask_url(s.url))
+  add("token", M.mask_token(s.token))
+  if not s.opted_in then
+    add("state", "off: " .. table.concat(s.missing or {}, " and ") .. " not set")
+    add("control", s.control and "enabled" or "disabled (MAKI_HUB_CONTROL=0)")
+  else
+    local state = s.token_refused and "stopped: hub refused the token (toggle to retry)"
+      or s.paused and "paused"
+      or "running"
+    add("state", state)
+    add("control", s.control and "enabled" or "disabled (MAKI_HUB_CONTROL=0)")
+    local beat = s.last_beat or {}
+    local result = beat.status and ("HTTP " .. beat.status)
+      or beat.err and ("error: " .. beat.err)
+      or "-"
+    add("last heartbeat", ago(s.now, beat.at) .. (beat.at and (", " .. result) or ""))
+    add("interval", (s.interval or "?") .. "s")
+    add("failures", (s.failures or 0) .. " in a row")
+    add("live sessions", s.live or 0)
+    if s.control then
+      local loops = (s.paused or s.token_refused) and " (paused)" or ""
+      add("poll loops", (s.polling or 0) .. loops)
+      add("mirror loops", (s.mirroring or 0) .. loops)
+    else
+      add("poll loops", "off")
+      add("mirror loops", "off")
+    end
+  end
+  add("fork APIs", s.fork and "yes (maki.api.list_commands)" or "no")
+  local allow = sorted_keys(s.allow)
+  add("allowlist", #allow > 0 and table.concat(allow, ", ") or "(none)")
+  return lines
 end
 
 return M

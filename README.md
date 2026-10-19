@@ -23,14 +23,17 @@ remove with `/packdel maki-plugins` after dropping the `pack.add` entry.
 | `plugin/automode.lua` | `/automode` | Reviewer models answer the permission prompt for calls that would otherwise prompt, as a layer on maki's `permission.prompt` slot. The plugin owns the security prompt, the timeout and the per-turn deny budget, and asks each model through a tool-less `maki.agent.session`. Toggle, status, model chain, and a verdict log showing the exact request each reviewer saw. |
 | `plugin/context.lua` | `/context` | Context-window usage panel: window and pricing from `maki.model.info`, with a `/v1/models` discovery fallback on older binaries. |
 | `plugin/goal.lua` | `/goal`, `goal_complete` tool | Keeps the agent working across turns until the goal is met, the budget or round cap is hit, or you intervene. Stops the `question` tool through its `tool.question.input` slot while a goal runs. |
+| `plugin/plugins.lua` | `/plugins` | Every plugin this maki knows, in Errors / Loaded / Disabled sections, with source and command/tool/autocmd counts. Enter opens the path, commands, tools and last 20 errors; `Y` copies the newest error, `R` refreshes. Toasts at startup when a package failed to load. Uses the fork's `maki.api.list_plugins()`, else bundled names + `maki.pack.get()` + a `<data>/site/pack` scan + the tail of `maki.log`. |
 | `plugin/pr_mention.lua` | `#` popup | Completes a PR/MR link from the repo in cwd via `gh` or `glab`. Fetches the open list once per directory (60s TTL) and narrows it in Lua as you type. |
-| `plugin/remote.lua` | none | Heartbeats this maki and its live sessions to a [maki-hub](https://github.com/Firaenix/maki-hub) every 5 s, so the hub dashboard shows the machine, mirrors each session's transcript and lets the hub prompt, answer prompts and cancel. Off unless `MAKI_HUB_URL` and `MAKI_HUB_TOKEN` are set; `MAKI_HUB_INTERVAL` tunes the beat. A refused token stops the loop instead of hammering. |
+| `plugin/remote.lua` | none | Heartbeats this maki and its live sessions to a [maki-hub](https://github.com/Firaenix/maki-hub) every 5 s, so the hub dashboard shows the machine, mirrors each session's transcript and lets the hub prompt, answer prompts and cancel. Off unless `MAKI_HUB_URL` and `MAKI_HUB_TOKEN` are set; `MAKI_HUB_INTERVAL` tunes the beat. A refused token stops the loop instead of hammering. `/remote-control status\|toggle\|logs` inspects, pauses and shows its log. |
 | `plugin/rv.lua` | `/rv` | In-maki review UI over the [`rv`](https://github.com/Firaenix/rv) CLI: file tree, diff pane, anchored comments, reply/resolve/abandon. |
 | `plugin/skills.lua` | `/skills` | Lists every skill the bundled `skill` tool would discover, without asking the model. |
 | `plugin/tool-alias.lua` | tool hook | Strips CLIProxyAPI's MCP alias decoration from tool names inside string payloads (`code_execution.code`, `batch.tool_calls[].tool`). |
 | `plugin/websearch.lua` | `websearch` tool | Replaces maki's builtin Exa-backed websearch with a self-hosted [SearXNG](https://docs.searxng.org/) instance (port of [g4bwy/maki-plugins](https://github.com/g4bwy/maki-plugins/tree/master/websearch)). Inert unless `SEARXNG_URL` is exported; send `SEARXNG_KEY` too when the URL points at an auth-guarded vhost (Caddy answers 401 without it). Where the plugin is active, instance errors fall through to the builtin's Exa MCP path, transparently. The host's init.lua must also set `plugins.websearch = { enabled = false }` and allowlist the instance in `net.allowed_private_hosts`. |
 | `lua/input_popup.lua` | module | Trigger-character completion popup over `maki.ui.input`: placement, keys, local filtering. Used by `pr_mention`. |
 | `lua/model_select.lua` | module | Shared model catalog + picker used by `automode` and `context`. |
+| `lua/plugins_core.lua` | module | Plugin list for `/plugins` and the hub: API or fallback collection, `maki.log` parsing, picker rows (pure, unit-tested). |
+| `lua/skills_core.lua` | module | Skill discovery shared by `/skills` and the hub's `maki/skills`. |
 
 ## Requirements
 
@@ -60,15 +63,58 @@ upgrades plain http and blocks private addresses, so a LAN hub additionally need
 Each reported session also long-polls the hub, so the hub can drive it: an ACP subset
 (`initialize`, `session/load`, `session/prompt`) answered from `TurnEnd`, plus `maki/prompt`,
 `maki/answer_permission`, `maki/answer_question` and `maki/cancel`, answered at once. It also
-mirrors its newest 300 messages (strings clipped to 16KB), open permission prompts and open
-questions to `/api/relay/mirror`: on change, every 700ms while working or waiting on the user,
-3s when idle, and at least once a minute. Question answers and cancel need a maki with
-`maki.session.answer_question` / `maki.session.cancel`; the mirror advertises which exist.
+mirrors its newest 300 messages (strings clipped to 16KB), open permission prompts, open
+questions and the current todo list to `/api/relay/mirror`: on change, every 700ms while
+working or waiting on the user, 3s when idle, and at least once a minute. `todos` is the input
+of the latest `todo_write` call anywhere in the session's history, as
+`[{content, status, priority?}]`, and is left out when there is none. Question answers and
+cancel need a maki with `maki.session.answer_question` / `maki.session.cancel`; the mirror
+advertises which exist.
+
+Send now: `maki/prompt {text, force: true}` queues the text and forces the queue through,
+moving the running turn to a background task (Ctrl+Enter in the TUI); the status is then
+`"forced"`, or `"queued"` when the turn waits on a permission prompt or question.
+`maki/detach {}` forces what is already queued and answers `{detached}`. Both need
+`maki.session.detach` (fork `pr/send-now`), advertised as the `send_now` capability;
+without it they answer `-32601` rather than quietly queueing.
+
+The hub can also read this maki's catalog: `maki/commands`, `maki/command`, `maki/models`,
+`maki/model_set`, `maki/skills` and `maki/plugins`, each advertised as a mirror capability
+of the same name. Commands are limited to the `remote_commands_allow` option (comma
+separated, no `/`, default `compact,new,btw,fast,workflow,reload,goal,skills`); nothing else
+is listed or run, and `!` lines and `/name!` are always refused. `/model`, `/thinking` and
+`/sessions` are listed as interactive so the hub can offer its own UI, never run. Set it in
+`maki.setup`:
+
+```lua
+maki.setup({ plugins = { ["maki-plugins"] = { remote_commands_allow = "compact,new,rv" } } })
+```
+
+The presence of `maki.api.list_commands` marks a fork build whose `run_command` and
+`maki.model.get/set` take `{session = id}`. Without it the command list falls back to a
+static table, commands run only when the target session is focused, the current model
+is reported only for the focused session, and `maki/model_set` answers `-32601`. With it,
+remote model switches pass `persist = false` so they don't change the global default.
+Heartbeats add each session's `thinking` level and a top-level `plugins_summary`
+`{total, errors}`, refreshed once a minute.
 Prompting needs the `agent` permission and answering permission prompts needs every
 permission, all granted in `plugin.toml`. `MAKI_HUB_CONTROL=0` keeps the plugin
 report-only, and `MAKI_HUB_INTERVAL` sets the beat spacing in seconds. The protocol is
 in the hub's `PROTOCOL.md`. Its `npm run test:e2e` runs this plugin in several real
 maki instances.
+
+`/remote-control` works with or without the env vars:
+
+- `status` (the default) opens a float with the hub URL, the token masked, running,
+  paused or token-refused, control on/off, the last heartbeat's time and HTTP status,
+  consecutive failures, live/poll/mirror loop counts, whether the fork APIs were
+  detected and the command allowlist. With the plugin off it says which variable is
+  missing.
+- `toggle` pauses or resumes the heartbeat, poll and mirror loops in memory; a restart
+  goes back to the env. While paused the hub marks this maki offline after 90 s. Resuming
+  after a refused token retries it once.
+- `logs` shows the last 200 remote log lines, newest at the bottom (`j`/`k`, `g`/`G` to
+  scroll); `logs clear` empties the buffer. Every line also goes to `maki.log`.
 
 ## Automode policy
 
@@ -134,3 +180,11 @@ stylua .          # config in .stylua.toml
 Point maki at a local checkout instead of the pinned revision by cloning into
 `<maki-data>/site/pack/<group>/start/maki-plugins/`; see
 [Lua packages](https://maki.sh/docs/packages/).
+## Tests
+
+The pure modules have unit tests that run under the `luau` CLI, without a maki build:
+
+```bash
+nix run nixpkgs#luau -- tests/remote_spec.lua
+nix run nixpkgs#luau -- tests/plugins_spec.lua
+```
