@@ -318,6 +318,8 @@ local capabilities = Core.capabilities(maki.session, {
   model_set = perSession and type(modelApi.set) == "function",
   skills = true,
   plugins = true,
+  -- Ships with the maki whose prompt takes images; nothing to probe.
+  images = true,
 })
 local answerQuestion = maki.session.answer_question
 local cancelSession = maki.session.cancel
@@ -335,8 +337,16 @@ local function wake(sessionId)
 end
 
 local controller = Core.controller({
-  prompt = function(sessionId, text, force)
-    local status, err = maki.session.prompt(text, { session = sessionId, force = force or nil })
+  -- Raises (bad image, non-vision model) surface through the controller's pcall.
+  prompt = function(sessionId, text, force, images)
+    local status, err = maki.session.prompt(
+      text,
+      {
+        session = sessionId,
+        force = force or nil,
+        images = images and #images > 0 and images or nil,
+      }
+    )
     -- A maki whose prompt ignores force still queued it; detach forces it.
     if
       force

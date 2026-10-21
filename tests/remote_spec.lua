@@ -139,11 +139,11 @@ end)
 
 local function fake_effects()
   local fx = { prompts = {}, transcript = {}, refuse = nil }
-  fx.prompt = function(sid, text)
+  fx.prompt = function(sid, text, _, images)
     if fx.refuse then
       return nil, fx.refuse
     end
-    fx.prompts[#fx.prompts + 1] = { sid, text }
+    fx.prompts[#fx.prompts + 1] = { sid, text, images }
     return "started"
   end
   fx.messages = function()
@@ -274,6 +274,23 @@ case("prompt text joins text blocks and accepts a bare string", function()
   eq(Core.prompt_text({ prompt = {} }), nil)
 end)
 
+local PNG = { media_type = "image/png", data = "iVBORw0KGgo=" }
+
+case("session/prompt relays image blocks, with or without text", function()
+  local fx = fake_effects()
+  local ctl = Core.controller(fx)
+  local function frame(id, blocks)
+    return { jsonrpc = "2.0", id = id, method = "session/prompt", params = { prompt = blocks } }
+  end
+  local img = { type = "image", mimeType = "image/png", data = PNG.data }
+  eq(#ctl.handle("s1", frame(1, { { type = "text", text = "look" }, img })), 0)
+  eq(#ctl.handle("s1", frame(2, { img })), 0)
+  same(fx.prompts, { { "s1", "look", { PNG } }, { "s1", "", { PNG } } })
+  local bad = { type = "image", mimeType = "image/bmp", data = PNG.data }
+  eq(ctl.handle("s1", frame(3, { { type = "text", text = "x" }, bad }))[1].error.code, -32602)
+  eq(ctl.pending("s1"), 2)
+end)
+
 -- maki/* actions
 
 local function full_effects()
@@ -332,6 +349,48 @@ case("maki/prompt rejects empty text and reports a refusal", function()
   fx.refuse = "busy"
   eq(call(ctl, "maki/prompt", { text = "x" }).error.code, -32000)
   eq(#fx.dirty, 0)
+end)
+
+case("maki/prompt forwards images and allows blank text with them", function()
+  local fx = full_effects()
+  local ctl = Core.controller(fx)
+  same(call(ctl, "maki/prompt", { text = "see", images = { PNG } }).result, { status = "started" })
+  same(call(ctl, "maki/prompt", { text = " ", images = { PNG } }).result, { status = "started" })
+  same(call(ctl, "maki/prompt", { text = "plain", images = {} }).result, { status = "started" })
+  same(fx.prompts, { { "s1", "see", { PNG } }, { "s1", " ", { PNG } }, { "s1", "plain" } })
+end)
+
+case("maki/prompt rejects bad images", function()
+  local fx = full_effects()
+  local ctl = Core.controller(fx)
+  local function code(params)
+    return call(ctl, "maki/prompt", params).error.code
+  end
+  eq(code({ text = " " }), -32602, "blank text needs images")
+  eq(code({ text = "", images = {} }), -32602, "an empty list is no images")
+  eq(code({ text = "x", images = { { media_type = "image/bmp", data = "AA==" } } }), -32602)
+  eq(code({ text = "x", images = { { media_type = "image/png", data = "" } } }), -32602)
+  eq(code({ text = "x", images = { { media_type = "image/png", data = "data:x" } } }), -32602)
+  eq(code({ text = "x", images = { "AA==" } }), -32602)
+  eq(code({ text = "x", images = PNG }), -32602, "an object is not an array")
+  local many = {}
+  for i = 1, Core.MAX_IMAGES + 1 do
+    many[i] = PNG
+  end
+  eq(code({ text = "x", images = many }), -32602)
+  eq(#fx.prompts, 0)
+  many[#many] = nil
+  same(call(ctl, "maki/prompt", { text = "x", images = many }).result, { status = "started" })
+end)
+
+case("maki/prompt reports a raised image refusal", function()
+  local fx = full_effects()
+  fx.prompt = function()
+    error("model does not support images")
+  end
+  local out = call(Core.controller(fx), "maki/prompt", { text = "x", images = { PNG } })
+  eq(out.error.code, -32000)
+  eq(out.error.message:find("model does not support images", 1, true) ~= nil, true)
 end)
 
 case("maki/answer_permission forwards the decision and reports landing", function()
@@ -654,6 +713,7 @@ case("capabilities follow the session API that exists", function()
     model_set = false,
     skills = false,
     plugins = false,
+    images = false,
   })
   local caps = Core.capabilities({ cancel = print, answer_question = print })
   eq(caps.cancel, true)
@@ -674,6 +734,8 @@ case("capabilities advertise the catalog methods that exist", function()
   eq(caps.model_set, false)
   eq(caps.command, false)
   eq(caps.plugins, false, "only a real true counts")
+  eq(caps.images, false)
+  eq(Core.capabilities({}, { images = true }).images, true)
 end)
 
 case("the mirror body keeps the newest window and tags empties", function()

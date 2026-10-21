@@ -299,7 +299,8 @@ function M.permission_entries(open, messages, empty, limit)
 end
 
 -- {features} flags the maki/* methods this maki can answer: commands,
--- command, models, model_set, skills, plugins. A missing flag reads false.
+-- command, models, model_set, skills, plugins, and images (prompt takes
+-- image attachments). A missing flag reads false.
 function M.capabilities(session_api, features)
   local api = type(session_api) == "table" and session_api or {}
   local f = type(features) == "table" and features or {}
@@ -315,6 +316,7 @@ function M.capabilities(session_api, features)
     model_set = f.model_set == true,
     skills = f.skills == true,
     plugins = f.plugins == true,
+    images = f.images == true,
   }
 end
 
@@ -633,7 +635,8 @@ end
 
 -- Control: the hub speaks a subset of ACP (JSON-RPC 2.0) to each live session
 -- through the relay. Effects are injected so the routing stays testable:
---   effects.prompt(session_id, text, force) -> "started"|"queued"|"forced" | nil, err
+--   effects.prompt(session_id, text, force, images) -> "started"|"queued"|"forced" | nil, err
+--     images is nil or a non-empty list of {media_type, data}, as M.check_images
 --   effects.messages(session_id)     -> recent transcript, oldest first | nil
 -- and, for the maki/* extensions that drive the UI directly:
 --   effects.answer_permission(request_id, decision, guidance) -> bool | nil, err
@@ -690,6 +693,68 @@ function M.prompt_text(params)
   end
   local text = table.concat(parts, "\n")
   return text ~= "" and text or nil
+end
+
+M.MAX_IMAGES = 8
+M.IMAGE_TYPES = {
+  ["image/png"] = true,
+  ["image/jpeg"] = true,
+  ["image/gif"] = true,
+  ["image/webp"] = true,
+}
+
+-- Image attachments -> a copied list, nil when absent or empty, or (nil, err).
+-- The base64 check is charset only; maki decodes and raises on the rest.
+function M.check_images(images)
+  if images == nil then
+    return nil
+  end
+  if type(images) ~= "table" then
+    return nil, "images must be an array"
+  end
+  local n = 0
+  for k in pairs(images) do
+    if type(k) ~= "number" then
+      return nil, "images must be an array"
+    end
+    n = n + 1
+  end
+  if n ~= #images then
+    return nil, "images must be an array"
+  end
+  if n > M.MAX_IMAGES then
+    return nil, "at most " .. M.MAX_IMAGES .. " images"
+  end
+  local out = {}
+  for i, img in ipairs(images) do
+    if type(img) ~= "table" then
+      return nil, "image " .. i .. " must be an object"
+    end
+    if type(img.media_type) ~= "string" or not M.IMAGE_TYPES[img.media_type] then
+      return nil,
+        "image " .. i .. " media_type must be image/png, image/jpeg, image/gif or image/webp"
+    end
+    if type(img.data) ~= "string" or img.data == "" or img.data:find("[^%w+/=]") then
+      return nil, "image " .. i .. " data must be non-empty base64"
+    end
+    out[i] = { media_type = img.media_type, data = img.data }
+  end
+  return n > 0 and out or nil
+end
+
+-- ACP image content blocks -> M.check_images, or (nil, err).
+function M.prompt_images(params)
+  local blocks = type(params) == "table" and params.prompt
+  if type(blocks) ~= "table" then
+    return nil
+  end
+  local images = {}
+  for _, b in ipairs(blocks) do
+    if type(b) == "table" and b.type == "image" then
+      images[#images + 1] = { media_type = b.mimeType, data = b.data }
+    end
+  end
+  return M.check_images(images)
 end
 
 -- Effect results as (value, err): a raise and a nil-pair read the same.
@@ -766,7 +831,11 @@ function M.controller(effects)
   local maki_methods = {}
 
   maki_methods["maki/prompt"] = function(session_id, id, params)
-    if type(params.text) ~= "string" or params.text:match("^%s*$") then
+    local images, bad = M.check_images(params.images)
+    if bad then
+      return failure(id, -32602, bad)
+    end
+    if type(params.text) ~= "string" or (not images and params.text:match("^%s*$")) then
       return failure(id, -32602, "text must be a non-empty string")
     end
     if params.force ~= nil and type(params.force) ~= "boolean" then
@@ -777,7 +846,7 @@ function M.controller(effects)
     if force and not effects.detach then
       return failure(id, -32601, "send now is not supported by this maki")
     end
-    local status, err = attempt(effects.prompt, session_id, params.text, force)
+    local status, err = attempt(effects.prompt, session_id, params.text, force, images)
     if not status then
       return failure(id, -32000, "prompt refused: " .. tostring(err))
     end
@@ -1014,11 +1083,15 @@ function M.controller(effects)
       return { result(id, { sessionId = session_id }) }
     end
     if method == "session/prompt" then
+      local images, bad = M.prompt_images(frame.params)
+      if bad then
+        return { failure(id, -32602, bad) }
+      end
       local text = M.prompt_text(frame.params)
-      if not text then
+      if not text and not images then
         return { failure(id, -32602, "prompt has no text content") }
       end
-      local ok, status, err = pcall(effects.prompt, session_id, text)
+      local ok, status, err = pcall(effects.prompt, session_id, text or "", nil, images)
       if not ok then
         status, err = nil, status
       end
