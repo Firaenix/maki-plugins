@@ -526,6 +526,9 @@ function M.mirror_body(session_id, messages, open_permissions, capabilities, emp
   }
 end
 
+-- What maki.session.cancel answers when it interrupted a turn.
+M.CANCELLED = "cancelled"
+
 local TODO_STATUSES = { pending = true, in_progress = true, completed = true, cancelled = true }
 
 -- A todo_write input as [{content, status, priority?}], or nil when it is not
@@ -642,7 +645,8 @@ end
 --   effects.answer_permission(request_id, decision, guidance) -> bool | nil, err
 --   effects.permission_open(session_id, request_id) -> bool        (optional)
 --   effects.answer_question(session_id, tool_id, answer) -> bool | nil, err
---   effects.cancel(session_id)       -> bool | nil, err
+--   effects.cancel(session_id)       -> "cancelled" | "idle" | nil, err
+--                                       (older makis answer true | false)
 --   effects.detach(session_id)       -> bool | nil, err  (send now; gates force)
 --   effects.capabilities()           -> as M.capabilities
 --   effects.touched(session_id)      after an action, so the mirror resends
@@ -1033,12 +1037,12 @@ function M.controller(effects)
     if not effects.cancel then
       return failure(id, -32601, "not supported by this maki")
     end
-    local cancelled, err = attempt(effects.cancel, session_id)
-    if cancelled == nil then
+    local state, err = attempt(effects.cancel, session_id)
+    if state == nil then
       return failure(id, -32000, "cancel refused: " .. tostring(err))
     end
     touched(session_id)
-    return result(id, { cancelled = cancelled == true })
+    return result(id, { cancelled = state == M.CANCELLED or state == true })
   end
 
   -- Forces what is already queued; false when there is nothing to force or

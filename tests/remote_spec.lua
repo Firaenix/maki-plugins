@@ -315,7 +315,7 @@ local function full_effects()
       return nil, fx.refuse
     end
     fx.calls[#fx.calls + 1] = { "cancel", sid }
-    return true
+    return fx.cancel_reply or "cancelled"
   end
   fx.capabilities = function()
     return Core.capabilities({ cancel = fx.cancel, answer_question = fx.answer_question })
@@ -478,6 +478,11 @@ case("maki/cancel cancels the relayed session", function()
   same(call(ctl, "maki/cancel", {}).result, { cancelled = true })
   same(fx.calls[1], { "cancel", "s1" })
   same(fx.dirty, { "s1" })
+  fx.cancel_reply = "idle"
+  same(call(ctl, "maki/cancel", {}).result, { cancelled = false })
+  -- Older makis answer a boolean.
+  fx.cancel_reply = true
+  same(call(ctl, "maki/cancel", {}).result, { cancelled = true })
   fx.refuse = "gone"
   eq(call(ctl, "maki/cancel", {}).error.code, -32000)
 end)
