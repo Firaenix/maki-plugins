@@ -706,6 +706,35 @@ case("permission entries join the tool input by tool id", function()
   eq(Core.permission_entries({}, messages, "EMPTY"), "EMPTY")
 end)
 
+case("question book answers the oldest form open in the session", function()
+  local book = Core.question_book()
+  local got = {}
+  local function deliver(name)
+    return function(reply)
+      got[#got + 1] = { name, reply }
+    end
+  end
+  local first = book.open("s1", deliver("first"))
+  book.open("s2", deliver("other"))
+  book.open("s1", deliver("second"))
+  eq(book.answer("s1", { answers = { { "Yes" } } }), true)
+  same(got[1], { "first", { type = "submit", answers = { { "Yes" } } } })
+  eq(book.answer("s1", { dismiss = true }), true)
+  same(got[2], { "second", { type = "dismiss" } })
+  eq(book.answer("s1", { dismiss = true }), false, "no form left in s1")
+  book.close(first)
+  eq(#got, 2)
+end)
+
+case("question book drops a closed form", function()
+  local book = Core.question_book()
+  local token = book.open("s1", function()
+    error("a closed form must not be answered")
+  end)
+  book.close(token)
+  eq(book.answer("s1", { dismiss = true }), false)
+end)
+
 case("capabilities follow the session API that exists", function()
   same(Core.capabilities({}), {
     cancel = false,
@@ -724,6 +753,7 @@ case("capabilities follow the session API that exists", function()
   eq(caps.cancel, true)
   eq(caps.answer_question, true)
   eq(caps.send_now, false)
+  eq(Core.capabilities({}, { question_slot = true }).answer_question, true)
   eq(Core.capabilities({ detach = print }).send_now, true)
   eq(Core.capabilities({ detach = true }).send_now, false, "only a function counts")
   eq(Core.capabilities(nil).cancel, false)

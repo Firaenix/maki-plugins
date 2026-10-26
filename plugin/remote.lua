@@ -306,6 +306,11 @@ local mirrorDirty = {}
 local permissions = Core.permission_book()
 local mirrorGate = Core.mirror_gate()
 local todoTracker = Core.todo_tracker()
+local questions = Core.question_book()
+-- A maki whose question plugin declares `question.form` lets the hub answer
+-- by layering the form; an older fork answered through answer_question.
+local answerQuestion = maki.session.answer_question
+local questionSlot = answerQuestion == nil and type(maki.api.set_slot) == "function"
 local function collectPlugins()
   return PluginsCore.collect(PluginsCore.maki_api())
 end
@@ -320,8 +325,8 @@ local capabilities = Core.capabilities(maki.session, {
   plugins = true,
   -- Ships with the maki whose prompt takes images; nothing to probe.
   images = true,
+  question_slot = questionSlot,
 })
-local answerQuestion = maki.session.answer_question
 local cancelSession = maki.session.cancel
 local detachSession = type(maki.session.detach) == "function" and maki.session.detach or nil
 
@@ -339,14 +344,11 @@ end
 local controller = Core.controller({
   -- Raises (bad image, non-vision model) surface through the controller's pcall.
   prompt = function(sessionId, text, force, images)
-    local status, err = maki.session.prompt(
-      text,
-      {
-        session = sessionId,
-        force = force or nil,
-        images = images and #images > 0 and images or nil,
-      }
-    )
+    local status, err = maki.session.prompt(text, {
+      session = sessionId,
+      force = force or nil,
+      images = images and #images > 0 and images or nil,
+    })
     -- A maki whose prompt ignores force still queued it; detach forces it.
     if
       force
@@ -365,9 +367,11 @@ local controller = Core.controller({
     return maki.session.answer_permission(requestId, { decision = decision, guidance = guidance })
   end,
   permission_open = permissions.has,
-  answer_question = answerQuestion and function(sessionId, toolId, answer)
+  answer_question = (answerQuestion and function(sessionId, toolId, answer)
     return answerQuestion(toolId, answer, { session = sessionId })
-  end or nil,
+  end) or (questionSlot and function(sessionId, _toolId, answer)
+    return questions.answer(sessionId, answer)
+  end) or nil,
   cancel = cancelSession and function(sessionId)
     return cancelSession({ session = sessionId })
   end or nil,
@@ -575,6 +579,40 @@ if controlEnabled then
   end)
   for _, name in ipairs({ "ToolStart", "ToolDone", "QuestionAsked", "QuestionResolved" }) do
     onEvent(name)
+  end
+
+  -- Races the user: whichever of the form and the hub answers first wins.
+  -- The hub's answer closes the window, which the form reads as a dismiss.
+  if questionSlot then
+    maki.api.set_slot("question.form", function(prev, qs, ev, onOpen)
+      local sessionId = type(ev) == "table" and ev.session or nil
+      local win, reply
+      local token = questions.open(sessionId, function(answer)
+        reply = answer
+        if win then
+          win:close()
+        end
+      end)
+      maki.async.on_cancel(function()
+        questions.close(token)
+      end)
+      wake(sessionId)
+      local ok, result = pcall(prev, qs, ev, function(w)
+        win = w
+        if reply then
+          w:close()
+        end
+        if onOpen then
+          onOpen(w)
+        end
+      end)
+      questions.close(token)
+      wake(sessionId)
+      if not ok then
+        error(result, 0)
+      end
+      return reply or result
+    end)
   end
 
   maki.api.create_autocmd("TurnEnd", {

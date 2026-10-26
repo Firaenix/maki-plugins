@@ -73,12 +73,15 @@ local function exa_parse_sse(body)
         return nil, "MCP error: " .. (type(message) == "string" and message or "unknown error")
       end
       if parsed.result and parsed.result.isError then
-        local bad = parsed.result.content and parsed.result.content[1]
+        local bad = parsed.result.content
+          and parsed.result.content[1]
           and parsed.result.content[1].text
         return nil, "MCP tool error: " .. (bad or "unknown error")
       end
-      local text = parsed.result and parsed.result.content
-        and parsed.result.content[1] and parsed.result.content[1].text
+      local text = parsed.result
+        and parsed.result.content
+        and parsed.result.content[1]
+        and parsed.result.content[1].text
       if type(text) == "string" and #text > 0 then
         return text
       end
@@ -178,7 +181,9 @@ local function searxng_search(input, base_url)
   local profile = PROFILES[input.profile or "fast"]
   local url = string.format(
     "%s/search?q=%s&format=json&categories=%s&pageno=1",
-    base_url, url_encode(input.query), profile.categories
+    base_url,
+    url_encode(input.query),
+    profile.categories
   )
   if input.language then
     url = url .. "&language=" .. url_encode(input.language)
@@ -240,14 +245,14 @@ maki.api.register_tool({
       num_results = { type = "integer", description = "Number of results to return (default 8)" },
       language = {
         type = "string",
-        description = "Restrict results to a language: SearXNG code, e.g. \"en\", \"de\", \"zh-CN\". "
+        description = 'Restrict results to a language: SearXNG code, e.g. "en", "de", "zh-CN". '
           .. "Omit to use the SearXNG instance's configured default.",
       },
       profile = {
         type = "string",
         enum = { "fast", "deep" },
-        description = "Engine set. \"fast\" (default): ~1 s, general web engines. "
-          .. "\"deep\": slower (up to ~25 s) and broader — news, academic and "
+        description = 'Engine set. "fast" (default): ~1 s, general web engines. '
+          .. '"deep": slower (up to ~25 s) and broader — news, academic and '
           .. "browser-backed engines. Pick it for coverage or obscure queries.",
       },
     },
@@ -280,7 +285,11 @@ maki.api.register_tool({
       local text, exa_err = exa_search(query, num_results)
       if not text then
         return {
-          llm_output = "error: SearXNG failed (" .. searxng_err .. "); Exa fallback failed (" .. exa_err .. ")",
+          llm_output = "error: SearXNG failed ("
+            .. searxng_err
+            .. "); Exa fallback failed ("
+            .. exa_err
+            .. ")",
           is_error = true,
         }
       end

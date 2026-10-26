@@ -228,6 +228,50 @@ end
 
 -- Open permission prompts per session, fed by PermissionRequested and
 -- PermissionResolved; maki has no call that lists them.
+-- Question forms held open by the `question.form` slot layer, waiting for the
+-- hub. The slot hands the layer no tool id, so an answer goes to the oldest
+-- form open in its session: forms open one at a time per session, oldest
+-- first being the order the hub lists them in.
+function M.question_book()
+  local open, seq = {}, 0
+  local book = {}
+
+  -- {deliver(reply)} receives the form-shaped reply. Returns a token for close.
+  function book.open(session_id, deliver)
+    seq = seq + 1
+    open[seq] = { session_id = session_id, deliver = deliver }
+    return seq
+  end
+
+  function book.close(token)
+    open[token] = nil
+  end
+
+  -- {answer} is { answers = {...} } or { dismiss = true }, as maki/answer_question
+  -- takes it. True when a form took it, false when none is open.
+  function book.answer(session_id, answer)
+    local oldest
+    for token, e in pairs(open) do
+      if e.session_id == session_id and (oldest == nil or token < oldest) then
+        oldest = token
+      end
+    end
+    if not oldest then
+      return false
+    end
+    local e = open[oldest]
+    open[oldest] = nil
+    if answer.dismiss then
+      e.deliver({ type = "dismiss" })
+    else
+      e.deliver({ type = "submit", answers = answer.answers })
+    end
+    return true
+  end
+
+  return book
+end
+
 function M.permission_book()
   local open, seq = {}, 0
   local book = {}
@@ -299,14 +343,15 @@ function M.permission_entries(open, messages, empty, limit)
 end
 
 -- {features} flags the maki/* methods this maki can answer: commands,
--- command, models, model_set, skills, plugins, and images (prompt takes
--- image attachments). A missing flag reads false.
+-- command, models, model_set, skills, plugins, images (prompt takes
+-- image attachments), and question_slot (the question form is layered, so
+-- questions can be answered). A missing flag reads false.
 function M.capabilities(session_api, features)
   local api = type(session_api) == "table" and session_api or {}
   local f = type(features) == "table" and features or {}
   return {
     cancel = api.cancel ~= nil,
-    answer_question = api.answer_question ~= nil,
+    answer_question = api.answer_question ~= nil or f.question_slot == true,
     -- maki.session.detach ships with prompt's force flag, so one probe covers both.
     send_now = type(api.detach) == "function",
     permission_decisions = M.PERMISSION_DECISIONS,
