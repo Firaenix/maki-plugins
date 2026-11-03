@@ -352,8 +352,6 @@ function M.capabilities(session_api, features)
   return {
     cancel = api.cancel ~= nil,
     answer_question = api.answer_question ~= nil or f.question_slot == true,
-    -- maki.session.detach ships with prompt's force flag, so one probe covers both.
-    send_now = type(api.detach) == "function",
     permission_decisions = M.PERMISSION_DECISIONS,
     commands = f.commands == true,
     command = f.command == true,
@@ -683,7 +681,7 @@ end
 
 -- Control: the hub speaks a subset of ACP (JSON-RPC 2.0) to each live session
 -- through the relay. Effects are injected so the routing stays testable:
---   effects.prompt(session_id, text, force, images) -> "started"|"queued"|"forced" | nil, err
+--   effects.prompt(session_id, text, images) -> "started"|"queued" | nil, err
 --     images is nil or a non-empty list of {media_type, data}, as M.check_images
 --   effects.messages(session_id)     -> recent transcript, oldest first | nil
 -- and, for the maki/* extensions that drive the UI directly:
@@ -692,10 +690,9 @@ end
 --   effects.answer_question(session_id, tool_id, answer) -> bool | nil, err
 --   effects.cancel(session_id)       -> "cancelled" | "idle" | nil, err
 --                                       (older makis answer true | false)
---   effects.detach(session_id)       -> bool | nil, err  (send now; gates force)
 --   effects.capabilities()           -> as M.capabilities
 --   effects.touched(session_id)      after an action, so the mirror resends
--- answer_question, cancel and detach are nil on a maki without those APIs. The
+-- answer_question and cancel are nil on a maki without those APIs. The
 -- catalog methods take, each optional (nil answers -32601):
 --   effects.allow                    allowlist set, as M.parse_allowlist
 --   effects.commands()               maki.api.list_commands() | nil (fallback)
@@ -887,15 +884,12 @@ function M.controller(effects)
     if type(params.text) ~= "string" or (not images and params.text:match("^%s*$")) then
       return failure(id, -32602, "text must be a non-empty string")
     end
-    if params.force ~= nil and type(params.force) ~= "boolean" then
-      return failure(id, -32602, "force must be a boolean")
+    -- No send_now capability, so the hub protocol wants force refused, not
+    -- quietly queued.
+    if params.force == true then
+      return failure(id, -32601, "send now is not supported")
     end
-    local force = params.force == true
-    -- An older maki would quietly queue instead, so say so rather than lie.
-    if force and not effects.detach then
-      return failure(id, -32601, "send now is not supported by this maki")
-    end
-    local status, err = attempt(effects.prompt, session_id, params.text, force, images)
+    local status, err = attempt(effects.prompt, session_id, params.text, images)
     if not status then
       return failure(id, -32000, "prompt refused: " .. tostring(err))
     end
@@ -1090,20 +1084,6 @@ function M.controller(effects)
     return result(id, { cancelled = state == M.CANCELLED or state == true })
   end
 
-  -- Forces what is already queued; false when there is nothing to force or
-  -- the turn waits on a permission prompt or question.
-  maki_methods["maki/detach"] = function(session_id, id)
-    if not effects.detach then
-      return failure(id, -32601, "not supported by this maki")
-    end
-    local detached, err = attempt(effects.detach, session_id)
-    if detached == nil then
-      return failure(id, -32000, "detach refused: " .. tostring(err))
-    end
-    touched(session_id)
-    return result(id, { detached = detached == true })
-  end
-
   function ctl.pending(session_id)
     return waiting[session_id] and #waiting[session_id] or 0
   end
@@ -1140,7 +1120,7 @@ function M.controller(effects)
       if not text and not images then
         return { failure(id, -32602, "prompt has no text content") }
       end
-      local ok, status, err = pcall(effects.prompt, session_id, text or "", nil, images)
+      local ok, status, err = pcall(effects.prompt, session_id, text or "", images)
       if not ok then
         status, err = nil, status
       end

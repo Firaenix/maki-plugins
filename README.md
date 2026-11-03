@@ -39,10 +39,11 @@ remove with `/packdel maki-plugins` after dropping the `pack.add` entry.
 
 - maki 0.5.0+. Several plugins use APIs that only exist on the
   [Firaenix/maki](https://github.com/Firaenix/maki) fork
-  (`maki.ui.input`, `maki.ui.picker`, `maki.model.info`,
-  `maki.session.messages`). Each one feature-detects and degrades instead of
-  failing to load. `automode` needs the `permission.prompt` slot
-  (tontinton/maki#1028); on a build without it the layer never fires.
+  (`maki.api.list_plugins`, `maki.api.list_commands`, `maki.session.cancel`,
+  `maki.session.answer_permission`, the `question.form` slot, image prompts,
+  session-scoped `maki.model` and `run_command`). Each one feature-detects and
+  degrades instead of failing to load. `model_select` uses `maki.ui.picker`
+  where a build has it and the Lua list picker otherwise.
 - `rv` on `PATH` for `/rv`; `gh` or `glab` for `#` completion.
 
 ## Hub remote
@@ -71,12 +72,8 @@ of the latest `todo_write` call anywhere in the session's history, as
 cancel need a maki with `maki.session.answer_question` / `maki.session.cancel`; the mirror
 advertises which exist.
 
-Send now: `maki/prompt {text, force: true}` queues the text and forces the queue through,
-moving the running turn to a background task (Ctrl+Enter in the TUI); the status is then
-`"forced"`, or `"queued"` when the turn waits on a permission prompt or question.
-`maki/detach {}` forces what is already queued and answers `{detached}`. Both need
-`maki.session.detach` (fork `pr/send-now`), advertised as the `send_now` capability;
-without it they answer `-32601` rather than quietly queueing.
+Send now is not offered: the mirror never advertises `send_now`, so `maki/prompt` with
+`force: true` and `maki/detach` answer `-32601` rather than quietly queueing.
 
 The hub can also read this maki's catalog: `maki/commands`, `maki/command`, `maki/models`,
 `maki/model_set`, `maki/skills` and `maki/plugins`, each advertised as a mirror capability

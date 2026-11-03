@@ -328,7 +328,6 @@ local capabilities = Core.capabilities(maki.session, {
   question_slot = questionSlot,
 })
 local cancelSession = maki.session.cancel
-local detachSession = type(maki.session.detach) == "function" and maki.session.detach or nil
 
 -- No session id wakes every mirror rather than guessing which one changed.
 local function wake(sessionId)
@@ -343,22 +342,11 @@ end
 
 local controller = Core.controller({
   -- Raises (bad image, non-vision model) surface through the controller's pcall.
-  prompt = function(sessionId, text, force, images)
-    local status, err = maki.session.prompt(text, {
+  prompt = function(sessionId, text, images)
+    return maki.session.prompt(text, {
       session = sessionId,
-      force = force or nil,
       images = images and #images > 0 and images or nil,
     })
-    -- A maki whose prompt ignores force still queued it; detach forces it.
-    if
-      force
-      and status == "queued"
-      and detachSession
-      and detachSession({ session = sessionId })
-    then
-      return "forced"
-    end
-    return status, err
   end,
   messages = function(sessionId)
     return maki.session.messages({ session = sessionId, last = 8 })
@@ -374,9 +362,6 @@ local controller = Core.controller({
   end) or nil,
   cancel = cancelSession and function(sessionId)
     return cancelSession({ session = sessionId })
-  end or nil,
-  detach = detachSession and function(sessionId)
-    return detachSession({ session = sessionId })
   end or nil,
   capabilities = function()
     return capabilities

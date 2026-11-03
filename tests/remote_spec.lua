@@ -139,7 +139,7 @@ end)
 
 local function fake_effects()
   local fx = { prompts = {}, transcript = {}, refuse = nil }
-  fx.prompt = function(sid, text, _, images)
+  fx.prompt = function(sid, text, images)
     if fx.refuse then
       return nil, fx.refuse
     end
@@ -487,55 +487,13 @@ case("maki/cancel cancels the relayed session", function()
   eq(call(ctl, "maki/cancel", {}).error.code, -32000)
 end)
 
-local function send_now_effects()
+case("send now is refused rather than quietly queued", function()
   local fx = full_effects()
-  fx.detached = true
-  fx.prompt = function(sid, text, force)
-    fx.prompts[#fx.prompts + 1] = { sid, text, force }
-    return force and "forced" or "queued"
-  end
-  fx.detach = function(sid)
-    if fx.refuse then
-      return nil, fx.refuse
-    end
-    fx.calls[#fx.calls + 1] = { "detach", sid }
-    return fx.detached
-  end
-  return fx
-end
-
-case("maki/prompt with force sends now", function()
-  local fx = send_now_effects()
   local ctl = Core.controller(fx)
-  same(call(ctl, "maki/prompt", { text = "now", force = true }).result, { status = "forced" })
-  same(call(ctl, "maki/prompt", { text = "later" }).result, { status = "queued" })
-  same(fx.prompts, { { "s1", "now", true }, { "s1", "later", false } })
-  same(fx.dirty, { "s1", "s1" })
-end)
-
-case("maki/prompt with force needs send now and a boolean", function()
-  local fx = send_now_effects()
-  local ctl = Core.controller(fx)
-  eq(call(ctl, "maki/prompt", { text = "x", force = "yes" }).error.code, -32602)
-  fx.detach = nil
-  local out = call(ctl, "maki/prompt", { text = "x", force = true })
-  eq(out.error.code, -32601)
-  eq(#fx.prompts, 0, "an unforceable prompt is not quietly queued")
-  same(call(ctl, "maki/prompt", { text = "x", force = false }).result, { status = "queued" })
-end)
-
-case("maki/detach forces the queue of the relayed session", function()
-  local fx = send_now_effects()
-  local ctl = Core.controller(fx)
-  same(call(ctl, "maki/detach", {}).result, { detached = true })
-  same(fx.calls[1], { "detach", "s1" })
-  same(fx.dirty, { "s1" })
-  fx.detached = false
-  same(call(ctl, "maki/detach", {}).result, { detached = false })
-  fx.refuse = "gone"
-  eq(call(ctl, "maki/detach", {}).error.code, -32000)
-  fx.detach = nil
+  eq(call(ctl, "maki/prompt", { text = "x", force = true }).error.code, -32601)
+  eq(#fx.prompts, 0, "a forced prompt is not queued")
   eq(call(ctl, "maki/detach", {}).error.code, -32601)
+  same(call(ctl, "maki/prompt", { text = "x", force = false }).result, { status = "started" })
 end)
 
 -- Mirror
@@ -739,7 +697,6 @@ case("capabilities follow the session API that exists", function()
   same(Core.capabilities({}), {
     cancel = false,
     answer_question = false,
-    send_now = false,
     permission_decisions = { "allow", "deny" },
     commands = false,
     command = false,
@@ -752,10 +709,7 @@ case("capabilities follow the session API that exists", function()
   local caps = Core.capabilities({ cancel = print, answer_question = print })
   eq(caps.cancel, true)
   eq(caps.answer_question, true)
-  eq(caps.send_now, false)
   eq(Core.capabilities({}, { question_slot = true }).answer_question, true)
-  eq(Core.capabilities({ detach = print }).send_now, true)
-  eq(Core.capabilities({ detach = true }).send_now, false, "only a function counts")
   eq(Core.capabilities(nil).cancel, false)
 end)
 
